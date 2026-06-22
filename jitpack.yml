@@ -1,0 +1,8 @@
+# JitPack build config for the Java SDK (packages/java-sdk).
+# JitPack builds on first request for a git tag; coordinate becomes
+#   com.github.onderyentar21.mailflat-sdks:mailflat-sdk:<tag>
+# Only the Java module is built (other SDKs are Python/JS, published to PyPI/npm).
+jdk:
+  - openjdk11
+install:
+  - cd packages/java-sdk && mvn install -B -DskipTests -Dmaven.javadoc.skip=true

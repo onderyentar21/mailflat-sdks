@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mailflat-mcp"
+version = "0.1.0"
+description = "MailFlat MCP server — disposable inbox tools (create, wait_for_otp, send, ...) for Claude Desktop, Cursor, and any MCP client."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "MailFlat", email = "support@mailflat.net" }]
+keywords = ["mcp", "model-context-protocol", "email", "disposable-email", "otp", "ai-agents", "claude", "cursor"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Email",
+]
+dependencies = [
+    "mailflat>=0.1.0",
+    "mcp>=1.2",
+]
+
+[project.scripts]
+mailflat-mcp = "mailflat_mcp.server:main"
+
+[project.urls]
+Homepage = "https://mailflat.net"
+Documentation = "https://mailflat.net/docs"
+Source = "https://github.com/onderyentar/mailflat"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mailflat_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/mailflat_mcp", "README.md", "LICENSE"]
