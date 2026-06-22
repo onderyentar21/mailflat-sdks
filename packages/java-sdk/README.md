@@ -4,16 +4,27 @@ Official Java client for [MailFlat](https://mailflat.net): disposable, automatio
 inboxes with **one-line OTP retrieval**. Built for **Selenium / JUnit** test suites. HTTP via the
 built-in `java.net.http` (no HTTP dependency); JSON via Jackson.
 
-> Java 11+ · coordinates `net.mailflat:mailflat-sdk`.
+> Java 11+ · published via [JitPack](https://jitpack.io).
 
-## Install (Maven)
+## Install (Maven, via JitPack)
 
 ```xml
+<repositories>
+  <repository><id>jitpack.io</id><url>https://jitpack.io</url></repository>
+</repositories>
+
 <dependency>
-  <groupId>net.mailflat</groupId>
-  <artifactId>mailflat-sdk</artifactId>
-  <version>0.1.0</version>
+  <groupId>com.github.onderyentar21</groupId>
+  <artifactId>mailflat-sdks</artifactId>
+  <version>v0.1.1</version>
 </dependency>
+```
+
+Gradle:
+
+```groovy
+repositories { maven { url 'https://jitpack.io' } }
+dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.1.1' }
 ```
 
 ## Quickstart

@@ -28,9 +28,9 @@ Authenticate with your account key (`mf_live_…`) from the dashboard (**Agents 
 </repositories>
 
 <dependency>
-  <groupId>com.github.onderyentar21.mailflat-sdks</groupId>
-  <artifactId>mailflat-sdk</artifactId>
-  <version>v0.1.0</version>
+  <groupId>com.github.onderyentar21</groupId>
+  <artifactId>mailflat-sdks</artifactId>
+  <version>v0.1.1</version>
 </dependency>
 ```
 
