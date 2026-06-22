@@ -5,4 +5,6 @@
 jdk:
   - openjdk11
 install:
-  - cd packages/java-sdk && mvn install -B -DskipTests -Dmaven.javadoc.skip=true
+  # Use the Maven wrapper (pins Maven 3.9.9) — JitPack's bundled Maven is too old
+  # for modern plugin versions. Tests are skipped here (run in CI/local).
+  - cd packages/java-sdk && ./mvnw install -B -DskipTests -Dmaven.javadoc.skip=true
