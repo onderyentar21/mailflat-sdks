@@ -163,6 +163,30 @@ def test_delete():
     assert mf.inbox(ADDR).delete()["message"] == "Inbox deleted"
 
 
+def test_delete_message():
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "DELETE"
+        assert req.url.path == f"/api/v1/inboxes/{ADDR}/messages/42"
+        return httpx.Response(200, json={"ok": True, "message": "Email deleted"})
+
+    mf = make_client(handler)
+    assert mf.inbox(ADDR).delete_message(42)["message"] == "Email deleted"
+
+
+def test_message_delete_sugar():
+    # latest() ile dönen Message'ın .delete()'i doğru endpoint'i çağırır
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(200, json={"ok": True, "email": {"id": 7, "subject": "Hi"}})
+        assert req.method == "DELETE" and req.url.path.endswith("/messages/7")
+        return httpx.Response(200, json={"ok": True, "message": "Email deleted"})
+
+    mf = make_client(handler)
+    msg = mf.inbox(ADDR).latest()
+    assert msg is not None and msg.id == 7
+    assert msg.delete()["message"] == "Email deleted"
+
+
 # ----------------------------------------------------------------------- errors
 @pytest.mark.parametrize("status,exc", [
     (401, AuthenticationError),

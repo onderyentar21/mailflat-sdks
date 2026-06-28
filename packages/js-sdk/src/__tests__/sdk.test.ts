@@ -167,6 +167,29 @@ describe("send / delete", () => {
     });
     expect((await mf.inbox(ADDR).delete()).message).toBe("Inbox deleted");
   });
+
+  it("deleteMessage", async () => {
+    const mf = makeClient((url, init) => {
+      expect(init.method).toBe("DELETE");
+      expect(url.endsWith(`/inboxes/${ADDR}/messages/42`)).toBe(true);
+      return jsonResponse(200, { ok: true, message: "Email deleted" });
+    });
+    expect((await mf.inbox(ADDR).deleteMessage(42)).message).toBe("Email deleted");
+  });
+
+  it("message.delete() sugar", async () => {
+    const mf = makeClient((url, init) => {
+      if (init.method === "GET") {
+        return jsonResponse(200, { ok: true, email: { id: 7, subject: "Hi" } });
+      }
+      expect(init.method).toBe("DELETE");
+      expect(url.endsWith("/messages/7")).toBe(true);
+      return jsonResponse(200, { ok: true, message: "Email deleted" });
+    });
+    const msg = await mf.inbox(ADDR).latest();
+    expect(msg?.id).toBe(7);
+    expect((await msg!.delete!()).message).toBe("Email deleted");
+  });
 });
 
 describe("errors", () => {

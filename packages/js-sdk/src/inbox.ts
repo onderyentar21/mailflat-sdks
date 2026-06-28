@@ -35,16 +35,23 @@ export class Inbox {
     this.raw = { address, ...meta };
   }
 
+  // API mail dict'ini Message'a çevirir + msg.delete() şekerini iliştirir.
+  private _wrap(d: Record<string, any>): Message {
+    const m = toMessage(d);
+    m.delete = () => this.deleteMessage(m.id as number);
+    return m;
+  }
+
   // Inbox'taki tüm mesajları (yeniden eskiye) döndürür.
   async messages(): Promise<Message[]> {
     const res = await this.client._get(`/api/v1/inboxes/${this.address}/messages`);
-    return ((res.emails as any[]) || []).map(toMessage);
+    return ((res.emails as any[]) || []).map((e) => this._wrap(e));
   }
 
   // En son mesajı döndürür (yoksa null).
   async latest(): Promise<Message | null> {
     const res = await this.client._get(`/api/v1/inboxes/${this.address}/latest`);
-    return res.email ? toMessage(res.email) : null;
+    return res.email ? this._wrap(res.email) : null;
   }
 
   // Yeni bir mesaj gelene kadar poll'lar; gelince Message döndürür.
@@ -60,7 +67,7 @@ export class Inbox {
             "This inbox is end-to-end encrypted; use a non-encrypted inbox for agent automation.",
         );
       }
-      if (res.email) return toMessage(res.email);
+      if (res.email) return this._wrap(res.email);
       if (Date.now() >= deadline) {
         throw new OTPTimeoutError(`No message arrived for ${this.address} within ${timeout}ms`);
       }
@@ -103,5 +110,10 @@ export class Inbox {
   // Inbox'u ve tüm mesajlarını siler. Geri alınamaz.
   async delete(): Promise<Record<string, any>> {
     return this.client._delete(`/api/v1/inboxes/${this.address}`);
+  }
+
+  // Inbox'taki TEK bir maili siler (inbox kalır). message.delete() bunu çağırır.
+  async deleteMessage(messageId: number): Promise<Record<string, any>> {
+    return this.client._delete(`/api/v1/inboxes/${this.address}/messages/${messageId}`);
   }
 }

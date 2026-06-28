@@ -155,6 +155,11 @@ public final class Inbox {
         return client.delete("/api/v1/inboxes/" + address);
     }
 
+    /** Delete a single message in this inbox (the inbox itself stays). Use with {@code msg.id()}. */
+    public JsonNode deleteMessage(int messageId) {
+        return client.delete("/api/v1/inboxes/" + address + "/messages/" + messageId);
+    }
+
     // ------------------------------------------------------------------- utils
     private void requireNotEncrypted(JsonNode res, String hint) {
         if (res.path("encrypted").asBoolean(false)) {

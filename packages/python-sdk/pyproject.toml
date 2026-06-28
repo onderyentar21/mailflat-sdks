@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailflat"
-version = "0.2.0"
+version = "0.3.0"
 description = "Official Python SDK for MailFlat — disposable, automation-friendly email inboxes with one-line OTP retrieval."
 readme = "README.md"
 requires-python = ">=3.8"

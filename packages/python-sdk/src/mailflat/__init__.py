@@ -27,7 +27,7 @@ from .errors import (
 )
 from .inbox import Inbox, Message
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "MailFlat",

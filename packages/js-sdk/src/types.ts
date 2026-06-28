@@ -21,6 +21,8 @@ export interface Message {
   sendError?: string;
   receivedAt?: string;
   raw: Record<string, any>; // backend serialize çıktısının tamamı
+  // Bu maili sil (inbox kalır). Inbox.messages()/latest()/waitForMessage() döndürdüğünde iliştirilir.
+  delete?: () => Promise<Record<string, any>>;
 }
 
 export interface CreateInboxOptions {

@@ -42,6 +42,17 @@ class Message:
     send_error: str | None = None
     received_at: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Bu mesajı döndüren Inbox (msg.delete() şekeri için). Inbox.messages()/latest()/wait_* doldurur.
+    _inbox: "Inbox | None" = field(default=None, repr=False, compare=False)
+
+    def delete(self) -> dict[str, Any]:
+        """Bu maili sil (inbox kalır). Mesaj bir Inbox'tan geldiyse çalışır."""
+        if self._inbox is None or self.id is None:
+            raise ValueError(
+                "This message isn't attached to an inbox (or has no id). "
+                "Use inbox.delete_message(message_id) instead."
+            )
+        return self._inbox.delete_message(self.id)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Message":
@@ -87,16 +98,22 @@ class Inbox:
         return f"<Inbox {self.address!r}>"
 
     # ----------------------------------------------------------------- okuma
+    def _wrap(self, data: dict[str, Any]) -> Message:
+        """API mail dict'ini Message'a çevirir + bu inbox ref'ini iliştirir (msg.delete() için)."""
+        m = Message.from_dict(data)
+        m._inbox = self
+        return m
+
     def messages(self) -> list[Message]:
         """Inbox'taki tüm mesajları (yeniden eskiye) döndürür."""
         res = self._client._get(f"/api/v1/inboxes/{self.address}/messages")
-        return [Message.from_dict(e) for e in (res.get("emails") or [])]
+        return [self._wrap(e) for e in (res.get("emails") or [])]
 
     def latest(self) -> Message | None:
         """En son mesajı döndürür (yoksa None)."""
         res = self._client._get(f"/api/v1/inboxes/{self.address}/latest")
         email = res.get("email")
-        return Message.from_dict(email) if email else None
+        return self._wrap(email) if email else None
 
     def wait_for_message(
         self, *, timeout: float = 30, poll_interval: float = 1.0
@@ -115,7 +132,7 @@ class Inbox:
                 )
             email = res.get("email")
             if email:
-                return Message.from_dict(email)
+                return self._wrap(email)
             if time.monotonic() >= deadline:
                 raise OTPTimeoutError(
                     f"No message arrived for {self.address} within {timeout}s"
@@ -158,3 +175,7 @@ class Inbox:
     def delete(self) -> dict[str, Any]:
         """Inbox'u ve tüm mesajlarını siler. Geri alınamaz."""
         return self._client._delete(f"/api/v1/inboxes/{self.address}")
+
+    def delete_message(self, message_id: int) -> dict[str, Any]:
+        """Inbox'taki TEK bir maili siler (inbox kalır). `Message.delete()` bunu çağırır."""
+        return self._client._delete(f"/api/v1/inboxes/{self.address}/messages/{message_id}")
