@@ -1,7 +1,7 @@
 // CreateInboxOptions — fluent builder for MailFlat.create(...).
 //
 // Connected to:
-//   - used by:    MailFlat.create(CreateInboxOptions), kullanıcı kodu
+//   - used by:    MailFlat.create(CreateInboxOptions), user code
 //   - depends on: yok
 //
 // Key export: CreateInboxOptions.builder()...build()

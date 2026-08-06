@@ -1,17 +1,29 @@
-// @mailflat/sdk — disposable, otomasyon-dostu e-posta inbox'ları için resmi JS/TS client.
+// @mailflat/sdk — the official JS/TS client for automation-friendly email inboxes.
 //
 // `npm i @mailflat/sdk` → `import { MailFlat } from "@mailflat/sdk"`.
 //
 // Connected to:
-//   - depends on: client.ts, inbox.ts, errors.ts, types.ts
-//   - used by:    kullanıcı kodu, @mailflat/ai-sdk
+//   - depends on: client.ts, inbox.ts, errors.ts, types.ts, version.ts
+//   - used by:    user code, @mailflat/ai-sdk
 //
-// Key export: MailFlat (+ Inbox, tipler, hatalar)
+// Key export: MailFlat (+ Inbox, tipler, hatalar, redactSecrets)
 
 export { MailFlat } from "./client";
 export type { MailFlatOptions } from "./client";
 export { Inbox } from "./inbox";
-export type { Message, CreateInboxOptions, WaitOptions, SendOptions } from "./types";
+export { redactSecrets, SECRET_NAME_PARTS } from "./redact";
+export { replySubject } from "./types";
+export type {
+  Message,
+  Attachment,
+  SpamReport,
+  Direction,
+  CreateInboxOptions,
+  ReadOptions,
+  ReplyOptions,
+  WaitOptions,
+  SendOptions,
+} from "./types";
 export {
   MailFlatError,
   AuthenticationError,
@@ -23,4 +35,5 @@ export {
   EncryptedInboxError,
 } from "./errors";
 
-export const VERSION = "0.1.0";
+// Single version source: version.ts (client.ts reads it for the User-Agent too).
+export { VERSION } from "./version";

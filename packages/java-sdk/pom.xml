@@ -11,7 +11,7 @@
 
   <groupId>net.mailflat</groupId>
   <artifactId>mailflat-sdk</artifactId>
-  <version>0.2.0</version>
+  <version>0.3.0</version>
   <packaging>jar</packaging>
 
   <name>MailFlat Java SDK</name>
@@ -33,14 +33,14 @@
   </properties>
 
   <dependencies>
-    <!-- JSON — tek runtime bağımlılığı. HTTP için java.net.http (JDK gömülü, dep YOK). -->
+    <!-- JSON — the only runtime dependency. HTTP uses java.net.http (built into the JDK). -->
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
       <version>${jackson.version}</version>
     </dependency>
 
-    <!-- Test — JUnit 5. Sahte sunucu = JDK com.sun.net.httpserver (ek dep yok). -->
+    <!-- Tests — JUnit 5. The fake server is JDK com.sun.net.httpserver (no extra dep). -->
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
@@ -50,6 +50,16 @@
   </dependencies>
 
   <build>
+    <!-- Version reaches the code from here and nowhere else: mailflat-version.properties
+         carries ${project.version} and is filtered at build time. Writing it a second time
+         by hand is how four packages once reported a version they had not published
+         (B-052). MailFlatTest locks pom <-> runtime agreement. -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

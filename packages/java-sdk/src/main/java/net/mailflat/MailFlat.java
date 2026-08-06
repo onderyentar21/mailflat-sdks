@@ -4,7 +4,7 @@
 // HTTP via java.net.http (JDK built-in, no HTTP dependency); JSON via Jackson.
 //
 // Connected to:
-//   - used by:    kullanıcı kodu (Selenium/JUnit test suite'leri), Inbox
+//   - used by:    user code (Selenium/JUnit test suites), Inbox
 //   - depends on: Inbox, Message, exceptions, Jackson, java.net.http
 //
 // Key export: MailFlat — create()/create(label)/create(opts), list(), inbox(address)
@@ -38,6 +38,44 @@ public final class MailFlat {
     private static final String DEFAULT_BASE_URL = "https://mailflat.net";
     private static final Set<Integer> RETRY_STATUSES =
             new HashSet<>(Arrays.asList(429, 502, 503, 504));
+
+    // Only side-effect-free (idempotent) methods are retried. POST is deliberately excluded:
+    // if the MTA accepts a /send and the gateway then returns 504, a retry delivers THE SAME
+    // MAIL TWICE and the caller never finds out. POST stays single-shot until we support
+    // Idempotency-Key.
+    private static final Set<String> IDEMPOTENT_METHODS =
+            new HashSet<>(Arrays.asList("GET", "HEAD", "DELETE"));
+
+    private static final long MAX_BACKOFF_MS = 8000L;
+
+    /** Read once from the filtered resource; pom.xml is the only place the version lives. */
+    private static final String VERSION = readVersion();
+
+    private static String readVersion() {
+        try (java.io.InputStream in =
+                     MailFlat.class.getResourceAsStream("/mailflat-version.properties")) {
+            if (in == null) {
+                return "unknown";
+            }
+            java.util.Properties p = new java.util.Properties();
+            p.load(in);
+            String v = p.getProperty("version");
+            // An unfiltered build leaves the literal placeholder; report unknown rather
+            // than send "${project.version}" to the server as our version.
+            return (v == null || v.isEmpty() || v.startsWith("${")) ? "unknown" : v;
+        } catch (IOException e) {
+            return "unknown";
+        }
+    }
+
+    /** The version this SDK actually reports. Package-private so tests can lock it. */
+    static String version() {
+        return VERSION;
+    }
+
+    private static String userAgent() {
+        return "mailflat-java/" + VERSION;
+    }
 
     private final String apiKey;
     private final String baseUrl;
@@ -120,24 +158,74 @@ public final class MailFlat {
     }
 
     JsonNode get(String path) {
-        return request("GET", path, null);
+        return request("GET", path, null, false);
     }
 
+    /**
+     * POST that is NEVER retried. See {@link #IDEMPOTENT_METHODS}: a retried send delivers
+     * the same mail twice and the caller never finds out.
+     */
     JsonNode post(String path, JsonNode body) {
-        return request("POST", path, body);
+        return request("POST", path, body, false);
+    }
+
+    /**
+     * POST that IS safe to repeat, because repeating it lands on the same end state
+     * (mark-read, burn). Never pass this for /send.
+     */
+    JsonNode postIdempotent(String path, JsonNode body) {
+        return request("POST", path, body, true);
     }
 
     JsonNode delete(String path) {
-        return request("DELETE", path, null);
+        return request("DELETE", path, null, false);
     }
 
-    private JsonNode request(String method, String path, JsonNode body) {
+    /**
+     * GET that returns raw bytes (attachment download) rather than JSON.
+     *
+     * <p>On an encrypted inbox the server cannot decrypt the file and answers with the
+     * envelope JSON instead of the bytes; that is detected here by the content type so the
+     * caller gets a clear exception rather than a JSON blob masquerading as a file.
+     */
+    byte[] getBytes(String path) {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + path))
+                .timeout(timeout)
+                .header("X-API-Key", apiKey)
+                .header("User-Agent", userAgent())
+                .GET()
+                .build();
+        HttpResponse<byte[]> resp;
+        try {
+            resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new MailFlatException("Network error: interrupted");
+        } catch (IOException e) {
+            throw new MailFlatException("Network error: " + e.getMessage());
+        }
+        String contentType = resp.headers().firstValue("content-type").orElse("");
+        if (resp.statusCode() >= 400) {
+            String detail = new String(resp.body(), java.nio.charset.StandardCharsets.UTF_8);
+            throw MailFlatException.forStatus(resp.statusCode(),
+                    extractDetail(parse(detail), resp.statusCode()));
+        }
+        if (contentType.startsWith("application/json")) {
+            throw new EncryptedInboxException(
+                    "This inbox is end-to-end encrypted; the server cannot decrypt this attachment.");
+        }
+        return resp.body();
+    }
+
+    private JsonNode request(String method, String path, JsonNode body, boolean idempotent) {
         int attempt = 0;
         while (true) {
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + path))
                     .timeout(timeout)
-                    .header("X-API-Key", apiKey);
+                    .header("X-API-Key", apiKey)
+                    .header("User-Agent", userAgent());
             if (body != null) {
                 rb.header("Content-Type", "application/json");
                 rb.method(method, HttpRequest.BodyPublishers.ofString(body.toString()));
@@ -156,9 +244,12 @@ public final class MailFlat {
             }
 
             int status = resp.statusCode();
-            if (RETRY_STATUSES.contains(status) && attempt < maxRetries) {
+            boolean canRepeat = idempotent || IDEMPOTENT_METHODS.contains(method);
+            if (RETRY_STATUSES.contains(status) && canRepeat && attempt < maxRetries) {
                 attempt++;
-                backoff(attempt);
+                // Obey the server when it says how long to wait. Coming back after our own
+                // 1s both earns another 429 and stretches the limit window.
+                backoff(attempt, retryAfterSeconds(resp));
                 continue;
             }
 
@@ -191,8 +282,24 @@ public final class MailFlat {
         return "Request failed with status " + status;
     }
 
-    private void backoff(int attempt) {
-        long ms = Math.min((long) Math.pow(2, attempt) * 500L, 4000L);
+    /** `Retry-After` in its seconds form. Absent or unparsable returns null (use backoff). */
+    private Long retryAfterSeconds(HttpResponse<String> resp) {
+        String raw = resp.headers().firstValue("Retry-After").orElse(null);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Math.max(0L, (long) Double.parseDouble(raw.trim()));
+        } catch (NumberFormatException e) {
+            // The HTTP-date form is valid but rare; rather than guess, fall back to backoff.
+            return null;
+        }
+    }
+
+    private void backoff(int attempt, Long retryAfter) {
+        long ms = retryAfter != null
+                ? Math.min(retryAfter * 1000L, MAX_BACKOFF_MS)
+                : Math.min((long) Math.pow(2, attempt) * 500L, MAX_BACKOFF_MS);
         try {
             Thread.sleep(ms);
         } catch (InterruptedException e) {

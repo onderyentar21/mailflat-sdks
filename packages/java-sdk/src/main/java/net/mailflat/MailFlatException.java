@@ -1,10 +1,10 @@
-// MailFlat SDK base exception — HTTP durum kodlarını anlamlı Java exception'larına çevirir.
+// MailFlat SDK base exception — maps HTTP status codes to meaningful Java exceptions.
 //
 // Connected to:
 //   - used by:    MailFlat, Inbox + alt tipler (Authentication/Permission/NotFound/RateLimit/Api/OtpTimeout/EncryptedInbox)
 //   - depends on: yok (saf)
 //
-// Key export: MailFlatException (+ statik forStatus fabrikası)
+// Key export: MailFlatException (+ the static forStatus factory)
 package net.mailflat;
 
 /** Base type for every MailFlat error. Carries the HTTP status code when available. */

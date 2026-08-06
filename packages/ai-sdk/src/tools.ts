@@ -1,31 +1,28 @@
-// MailFlat tool suite — Vercel AI SDK için 6 araçlık set (createInbox, listInboxes,
-// readMessages, waitForOtp, sendEmail, deleteInbox).
+// MailFlat tool suite for the Vercel AI SDK — createInbox, listInboxes, readMessages,
+// waitForOtp, waitForMessage, sendEmail, markRead, burnInbox, deleteInbox, deleteMessage.
 //
-// @mailflat/sdk client'ının üstüne ince bir katman; tüm HTTP/iş mantığı orada (DRY).
-// Üretilen araç nesneleri hem AI SDK v3/v4 (`parameters`) hem v5 (`inputSchema`) ile uyumlu
-// olacak şekilde her iki anahtarı da taşır → `ai` paketine doğrudan import bağımlılığı yok
-// (yalnızca kullanıcının generateText çağrısında peer dependency olarak gerekir).
+// A thin layer over the @mailflat/sdk client; all HTTP and behaviour live there (DRY).
 //
 // Connected to:
-//   - depends on: @mailflat/sdk (MailFlat client), zod (şema)
-//   - used by:    index.ts, kullanıcı kodu (generateText({ tools: { ...mailflatToolSuite(...) } }))
+//   - depends on: @mailflat/sdk (MailFlat client + redactSecrets), zod (schemas)
+//   - used by:    index.ts, user code (generateText({ tools: { ...mailflatToolSuite(...) } }))
 //
-// Key export: mailflatToolSuite(options) → araç nesneleri sözlüğü
+// Key export: mailflatToolSuite(options) → dictionary of tool objects
 
-import { EncryptedInboxError, MailFlat, MailFlatError, OTPTimeoutError } from "@mailflat/sdk";
+import { EncryptedInboxError, MailFlat, MailFlatError, OTPTimeoutError, redactSecrets } from "@mailflat/sdk";
 import { z } from "zod";
 
 export interface ToolSuiteOptions {
-  /** MailFlat hesap API key'i (mf_live_...). Verilmezse MAILFLAT_API_KEY env okunur. */
+  /** MailFlat account API key (mf_live_...). Falls back to the MAILFLAT_API_KEY env var. */
   apiKey?: string;
-  /** API kökü (varsayılan https://mailflat.net). Self-host/test için override. */
+  /** API root (defaults to https://mailflat.net). Override for self-hosted or test setups. */
   baseUrl?: string;
-  /** Hazır bir MailFlat client enjekte et (testler / paylaşımlı client için). */
+  /** Inject an existing MailFlat client (for tests or a shared client). */
   client?: MailFlat;
 }
 
-// Vercel AI SDK aracının yapısı. `parameters` (v3/v4) ve `inputSchema` (v5) aynı şemayı
-// işaret eder; generateText hangi sürümdeyse kendi anahtarını okur, diğerini yok sayar.
+// Shape of a Vercel AI SDK tool. `parameters` (v3/v4) and `inputSchema` (v5) point at the
+// same schema; generateText reads whichever key its version knows and ignores the other.
 export interface MailFlatTool {
   description: string;
   parameters: z.ZodTypeAny;
@@ -41,10 +38,12 @@ function defineTool(
   return { description, parameters: schema, inputSchema: schema, execute };
 }
 
-// MailFlatError'ı modelin işleyebileceği düz bir sonuca çevirir (atmak yerine).
+// Turns a MailFlatError into a plain result the model can act on (instead of throwing) AND
+// redacts the output. Redaction lives HERE on purpose: every tool passes through this point,
+// including the one added tomorrow, so nobody can forget to call `redactSecrets`.
 async function guarded<T>(fn: () => Promise<T>): Promise<T | { error: string }> {
   try {
-    return await fn();
+    return redactSecrets(await fn());
   } catch (err) {
     if (err instanceof MailFlatError) return { error: err.message };
     throw err;
@@ -52,8 +51,8 @@ async function guarded<T>(fn: () => Promise<T>): Promise<T | { error: string }> 
 }
 
 /**
- * MailFlat araçlarını Vercel AI SDK'nın `generateText`/`streamText` `tools` alanına yaymak
- * için hazır nesneler döndürür.
+ * Returns ready-made tool objects to spread into the Vercel AI SDK's `generateText` /
+ * `streamText` `tools` field.
  *
  * @example
  * const result = await generateText({
@@ -103,13 +102,19 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
     ),
 
     readMessages: defineTool(
-      "Read every message in the given inbox address (newest first).",
+      "Read messages in the given inbox address (newest first). Returns received mail by default.",
       z.object({
         address: z.string().describe("The full inbox address to read, e.g. signup-8f3@mailflat.net."),
+        direction: z
+          .enum(["in", "out", "all"])
+          .optional()
+          .describe(
+            "'in' (default) for received mail, 'out' for mail sent from this address, 'all' for both.",
+          ),
       }),
-      ({ address }) =>
+      ({ address, direction }) =>
         guarded(async () => {
-          const messages = await client.inbox(address).messages();
+          const messages = await client.inbox(address).messages({ direction });
           return { emails: messages.map((m) => m.raw) };
         }),
     ),
@@ -128,12 +133,43 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
       async ({ address, timeout }) => {
         try {
           const otp = await client.inbox(address).waitForOtp({ timeout });
-          return { otp };
+          // This tool handles its own error branches, so it does NOT pass through
+          // `guarded()` → redaction is applied by hand. Today it returns only a string; if a
+          // message body is added here tomorrow (as in the MCP server), the leak must not
+          // silently come back.
+          return redactSecrets({ otp });
         } catch (err) {
           if (err instanceof OTPTimeoutError) return { otp: null, error: "timeout" };
           if (err instanceof EncryptedInboxError)
             return { otp: null, encrypted: true, error: err.message };
           if (err instanceof MailFlatError) return { otp: null, error: err.message };
+          throw err;
+        }
+      },
+    ),
+
+    waitForMessage: defineTool(
+      "Poll an inbox until a NEW message arrives, then return it. Only received mail counts, so you can send to someone and wait for their reply without matching your own message.",
+      z.object({
+        address: z.string().describe("The inbox address to poll."),
+        timeout: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Maximum milliseconds to wait before giving up (default 30000)."),
+      }),
+      async ({ address, timeout }) => {
+        try {
+          const msg = await client.inbox(address).waitForMessage({ timeout });
+          // Same reason as waitForOtp: it handles its own error branches, so it does not
+          // pass through guarded() and redaction is applied by hand.
+          return redactSecrets({ email: msg.raw });
+        } catch (err) {
+          if (err instanceof OTPTimeoutError) return { email: null, error: "timeout" };
+          if (err instanceof EncryptedInboxError)
+            return { email: null, encrypted: true, error: err.message };
+          if (err instanceof MailFlatError) return { email: null, error: err.message };
           throw err;
         }
       },
@@ -152,12 +188,56 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
         guarded(() => client.inbox(address).send(to, { subject, body, html })),
     ),
 
+    reply: defineTool(
+      "Reply to a message so it stays in the SAME conversation. Prefer this over sendEmail when answering: it fills in the recipient, an 'Re:' subject and the threading headers. A plain sendEmail starts a new conversation in the recipient's client, which does not look like a reply.",
+      z.object({
+        address: z.string().describe("The inbox address that holds the message."),
+        messageId: z.number().describe("The id of the message to answer."),
+        body: z.string().optional().describe("Plain-text reply body."),
+        html: z.string().optional().describe("Optional HTML body."),
+      }),
+      ({ address, messageId, body, html }) =>
+        guarded(async () => {
+          const inbox = client.inbox(address);
+          const messages = await inbox.messages({ direction: "all" });
+          const target = messages.find((m) => m.id === messageId);
+          if (!target) return { error: `Message ${messageId} not found in ${address}` };
+          return target.reply!(body ?? "", { html });
+        }),
+    ),
+
+    markRead: defineTool(
+      "Mark one message as read so later polls can skip it.",
+      z.object({
+        address: z.string().describe("The inbox address that holds the message."),
+        messageId: z.number().describe("The id of the message to mark as read."),
+      }),
+      ({ address, messageId }) => guarded(() => client.inbox(address).markRead(messageId)),
+    ),
+
+    burnInbox: defineTool(
+      "Delete every message in an inbox but KEEP the address. Use between scenarios so the address stays registered wherever you already used it.",
+      z.object({
+        address: z.string().describe("The inbox address to empty."),
+      }),
+      ({ address }) => guarded(() => client.inbox(address).burn()),
+    ),
+
     deleteInbox: defineTool(
       "Delete an inbox and all its messages by address. Irreversible.",
       z.object({
         address: z.string().describe("The inbox address to delete."),
       }),
       ({ address }) => guarded(() => client.inbox(address).delete()),
+    ),
+
+    deleteMessage: defineTool(
+      "Delete a single message in an inbox by its id (the inbox itself stays).",
+      z.object({
+        address: z.string().describe("The inbox address that holds the message."),
+        messageId: z.number().describe("The id of the message to delete."),
+      }),
+      ({ address, messageId }) => guarded(() => client.inbox(address).deleteMessage(messageId)),
     ),
   };
 }

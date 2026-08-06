@@ -1,10 +1,10 @@
-"""MailFlat Python SDK testleri — httpx.MockTransport ile gerçek /api/v1 yanıtları taklit edilir.
+"""MailFlat Python SDK tests — real /api/v1 responses are faked with httpx.MockTransport.
 
 Connected to:
   - imports from: mailflat (SDK), httpx
 
-Kapsam: create/list/messages/latest/send/delete + wait_for_otp (başarı/timeout/şifreli)
-+ hata eşlemesi (401/403/404/429) + env API key.
+Covers: create/list/messages/latest/send/delete + wait_for_otp (success/timeout/encrypted)
++ error mapping (401/403/404/429) + the env API key.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ ADDR = "signup-test@x7k2m.mailflat.net"
 
 
 def make_client(handler) -> MailFlat:
-    """Verilen handler ile MockTransport kullanan bir MailFlat client'ı kurar."""
+    """Build a MailFlat client backed by MockTransport using the given handler."""
     transport = httpx.MockTransport(handler)
     http = httpx.Client(transport=transport, base_url="https://mailflat.net",
                         headers={"X-API-Key": "mf_test_x"})
@@ -113,7 +113,7 @@ def test_wait_for_otp_success():
 
     def handler(req: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        if calls["n"] < 3:  # ilk 2 poll boş
+        if calls["n"] < 3:  # first two polls come back empty
             return httpx.Response(200, json={"ok": True, "email": None})
         return httpx.Response(200, json={"ok": True, "email": {"otp_code": "987654"}})
 
@@ -174,7 +174,7 @@ def test_delete_message():
 
 
 def test_message_delete_sugar():
-    # latest() ile dönen Message'ın .delete()'i doğru endpoint'i çağırır
+    # .delete() on a Message returned by latest() must hit the right endpoint
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET":
             return httpx.Response(200, json={"ok": True, "email": {"id": 7, "subject": "Hi"}})
@@ -196,7 +196,7 @@ def test_message_delete_sugar():
 ])
 def test_error_mapping(status, exc):
     mf = make_client(lambda req: httpx.Response(status, json={"detail": "nope"}))
-    # 429 retry'lardan sonra yine fırlamalı → retries=0 ile hızlandır
+    # It must still raise after the retries are exhausted → retries=0 keeps it fast
     mf.max_retries = 0
     with pytest.raises(exc):
         mf.inbox(ADDR).messages()

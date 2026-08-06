@@ -16,7 +16,7 @@ built-in `java.net.http` (no HTTP dependency); JSON via Jackson.
 <dependency>
   <groupId>com.github.onderyentar21</groupId>
   <artifactId>mailflat-sdks</artifactId>
-  <version>v0.1.1</version>
+  <version>v0.3.0</version>
 </dependency>
 ```
 
@@ -24,7 +24,7 @@ Gradle:
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.1.1' }
+dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.3.0' }
 ```
 
 ## Quickstart
@@ -82,13 +82,43 @@ driver.quit();
 - `inbox(address)` → `Inbox` — attach without a network call
 
 ### `Inbox`
-`address()`, `name()`, `apiKey()`, `retentionHours()`, `messages()` → `List<Message>`,
-`latest()` → `Optional<Message>`, `waitForOtp(seconds)` → `String`, `waitForMessage(seconds)`,
-`send(to, subject, body[, html])`, `delete()`.
+`address()`, `name()`, `apiKey()`, `retentionHours()`, `delete()`.
+
+**Read** — every read defaults to `Direction.IN`, so a wait right after `send()` never returns
+your own outgoing mail:
+`messages([Direction])` → `List<Message>`, `latest([Direction])` → `Optional<Message>`,
+`waitForMessage(seconds[, Direction])`, `waitForOtp(seconds)` → `String`.
+
+**Write** — `send(to, subject, body[, html[, inReplyTo]])`, `markRead(messageId)`, `burn()`
+(delete every message, keep the address), `deleteMessage(messageId)`,
+`downloadAttachment(messageId, attachmentId)` → `byte[]`.
 
 ### `Message`
 `otp()`, `subject()`, `sender()`, `text()`, `html()`, `toAddress()`, `direction()`,
-`receivedAt()`, `raw()`.
+`isRead()`, `receivedAt()`, `raw()`.
+
+**Added in 0.3.0:** `links()` → `List<String>` (clickable URLs written in *this* message;
+links quoted from an earlier one are excluded), `attachments()` → `List<Attachment>`,
+`headers()` → `Map<String,String>` (null on an encrypted inbox), `spam()`,
+`header(name)` (case-insensitive), `messageId()`, `replyToAddress()`,
+`reply(body[, html, subject])`, `markRead()`, `delete()`.
+
+> ⚠️ `sender()` is the SMTP **envelope** sender. For transactional mail that is usually a
+> bounce address, so `send(to = msg.sender(), …)` quietly delivers your reply to a machine.
+> Use `reply(…)`, which targets `replyToAddress()` and adds the `In-Reply-To` / `References`
+> headers Gmail and Outlook thread on.
+
+### `Attachment`
+`filename()`, `contentType()`, `sizeBytes()`, `isTruncated()`, `download()` → `byte[]`.
+Bytes are never included in a listing, so `download()` makes its own request. A `truncated`
+attachment exceeded the storage cap and its bytes were never stored.
+
+## Retries
+
+Reads (`GET`/`DELETE`) are retried on `429/502/503/504` and honour the server's `Retry-After`.
+**`send()` and `create()` are never retried.** A retried send delivers the same mail twice and
+the caller never finds out; a retried create opens a second inbox and burns quota.
+`markRead()` and `burn()` are retried, because repeating them lands on the same end state.
 
 ## Errors
 

@@ -1,18 +1,18 @@
-"""MailFlat MCP server paketi — `mailflat` SDK üstünde MCP tool seti.
+"""MailFlat MCP server package — an MCP tool set built on the `mailflat` SDK.
 
-`uvx mailflat-mcp` ile çalışır; Claude Desktop / Cursor / agent framework'lerine
-disposable inbox araçları açar.
+Runs via `uvx mailflat-mcp`; exposes inbox tools to Claude Desktop, Cursor and any agent
+framework that speaks MCP.
 
 Connected to:
   - imports from: mailflat_mcp.server
-  - imported by:  console script `mailflat-mcp`, MCP client'lar
+  - imported by:  the `mailflat-mcp` console script, MCP clients
 
 Key exports:
   - `mcp` — FastMCP instance
-  - `main()` — stdio server giriş noktası
+  - `main()` — stdio server entry point
 """
 from .server import main, mcp
 
-__version__ = "0.1.0"
+from ._version import __version__
 
 __all__ = ["mcp", "main", "__version__"]

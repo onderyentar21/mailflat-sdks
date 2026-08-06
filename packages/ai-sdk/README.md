@@ -36,10 +36,18 @@ both the v3/v4 (`parameters`) and v5 (`inputSchema`) tool shapes — no version 
 |---|---|
 | `createInbox` | Create a disposable inbox → returns its address. `{ prefix?, label?, retentionHours? }` |
 | `listInboxes` | List inboxes available to this API key. |
-| `readMessages` | Read every message in an inbox (newest first). `{ address }` |
+| `readMessages` | Read messages in an inbox (newest first). `{ address, direction? }` — received mail by default |
 | `waitForOtp` | Poll until an OTP arrives, then return it. `{ address, timeout? }` (ms) |
+| `waitForMessage` | Poll until a new message arrives; ignores mail you sent. `{ address, timeout? }` |
 | `sendEmail` | Send a DKIM-signed email from an inbox. `{ address, to, subject?, body?, html? }` |
+| `reply` | Answer a message **in the same conversation**; threading headers filled in. `{ address, messageId, body?, html? }` |
+| `markRead` | Mark one message read so later polls skip it. `{ address, messageId }` |
+| `burnInbox` | Delete every message but KEEP the address. `{ address }` |
 | `deleteInbox` | Delete an inbox and all its messages. `{ address }` |
+| `deleteMessage` | Delete one message; the inbox itself stays. `{ address, messageId }` |
+
+> Reads default to **received** mail. Without that, an agent that sends to a peer and then
+> waits for the reply matches its own outgoing message immediately.
 
 Tool errors are returned to the model as `{ error: "..." }` (rather than thrown) so the agent
 can recover; `waitForOtp` also returns `{ otp: null, error: "timeout" }` or

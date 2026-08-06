@@ -1,4 +1,4 @@
-"""`python -m mailflat_mcp` giriş noktası → stdio MCP server.
+"""`python -m mailflat_mcp` entry point → stdio MCP server.
 
 Connected to:
   - imports from: mailflat_mcp.server

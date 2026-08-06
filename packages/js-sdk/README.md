@@ -16,8 +16,8 @@ import { MailFlat } from "@mailflat/sdk";
 const mailflat = new MailFlat({ apiKey: process.env.MAILFLAT_API_KEY });
 
 // 1 · spin up a disposable inbox
-const inbox = await mailflat.create({ label: "signup-test" });
-console.log(inbox.address); // → signup-test-8f3@x7k2m.mailflat.net
+const inbox = await mailflat.create({ prefix: "signup-test", label: "checkout flow" });
+console.log(inbox.address); // → signup-test@x7k2m.mailflat.net
 
 // 2 · your app/browser submits the form using inbox.address ...
 
@@ -31,7 +31,7 @@ console.log(otp); // → "123456"
 ## For AI agents
 
 ```ts
-const inbox = await mailflat.create({ label: "deep-research" });
+const inbox = await mailflat.create({ prefix: "deep-research" });
 await browser.fill("#email", inbox.address);
 await browser.click("Sign up");
 
@@ -45,22 +45,49 @@ await browser.fill("#code", otp);
 `{ apiKey?, baseUrl?, timeout?, maxRetries? }`. `apiKey` falls back to `process.env.MAILFLAT_API_KEY`.
 Use `baseUrl` for self-hosted / BYOD deployments (default `https://mailflat.net`).
 
-- `create(opts) => Promise<Inbox>` — open a new inbox. `createInbox(opts)` is an alias.
+- `create(opts) => Promise<Inbox>` — open a new inbox. **`prefix` shapes the address, `label`
+  does not**: `prefix: "signup-test"` gives `signup-test@…`, while `label` is only a dashboard
+  name. Without `prefix` you get a random `agent-…` address. `createInbox(opts)` is an alias.
   `opts`: `{ prefix?, label?, subdomain?, domain?, retentionHours? }`.
 - `list() => Promise<Inbox[]>` — inboxes opened with this key.
 - `inbox(address) => Inbox` — attach to an existing address without a network call.
 
 ### `Inbox`
 - `.address` — the email address.
-- `.messages() => Promise<Message[]>` — all messages, newest first.
-- `.latest() => Promise<Message | null>` — most recent message.
+- `.messages({ direction? }) => Promise<Message[]>` — messages, newest first.
+- `.latest({ direction? }) => Promise<Message | null>` — most recent message.
 - `.waitForOtp({ timeout?, pollInterval? }) => Promise<string>` — poll until an OTP arrives; returns the code. `timeout` is in **ms** (default 30000).
-- `.waitForMessage({ timeout?, pollInterval? }) => Promise<Message>` — poll until any message arrives.
+- `.waitForMessage({ timeout?, pollInterval?, direction? }) => Promise<Message>` — poll until any message arrives.
 - `.send(to, { subject?, body?, html? }) => Promise<...>` — send a DKIM-signed email from this inbox.
+- `.markRead(messageId) => Promise<...>` — mark a message read so later polls can skip it.
+- `.burn() => Promise<...>` — delete every message but keep the address.
+- `.downloadAttachment(messageId, attachmentId) => Promise<Uint8Array>` — fetch attachment bytes.
 - `.delete() => Promise<...>` — delete the inbox and all its messages.
 
+> **Reads return received mail by default** (`direction: "in"`). Use `"out"` for mail you
+> sent from this address, `"all"` for both. Without this, `send()` followed by
+> `waitForMessage()` matches your own outgoing message — which breaks agent-to-agent flows.
+
 ### `Message`
-`.otp`, `.subject`, `.sender`, `.text`, `.html`, `.toAddress`, `.direction`, `.receivedAt`, `.raw`.
+`.otp`, `.subject`, `.sender`, `.text`, `.html`, `.toAddress`, `.direction`, `.receivedAt`,
+`.links`, `.attachments`, `.spam`, `.headers`, `.isRead`, `.raw`.
+
+- `.links` — URLs found in the body (HTML hrefs first). For "click the verification link" flows.
+- `.attachments` — metadata; `msg.attachments[0].download()` fetches the bytes.
+  ⚠️ `send()` cannot attach files yet, so you cannot produce an attachment from the SDK alone.
+- `.spam` — `{score, required, is_spam, rules, scanner}`, or `null` when never scanned.
+  ⚠️ Spam scanning is currently **disabled** on mailflat.net, so today this is `null` for
+  every message.
+- `.headers` — raw headers, exactly as they arrived. Names are case-insensitive per
+  RFC 5322 but this is a plain object, so **do not index it**: the real key is `Message-ID`,
+  and `headers["Message-Id"]` is `undefined`. Use `.header("message-id")` or `.messageId`.
+- `.reply(body, { html?, subject? })` — answer this message **in the same conversation**
+  (recipient, `Re:` subject and `In-Reply-To` / `References` are filled in). A hand-rolled
+  `send()` starts a new thread instead.
+- ⚠️ `.sender` is the **SMTP envelope sender** (MAIL FROM) — usually a bounce address on
+  transactional mail. Use `.replyToAddress` (or `.reply()`), which resolves
+  `Reply-To` → `From` → envelope sender.
+- `.markRead()` / `.delete()` — act on this message directly.
 
 ## Errors
 

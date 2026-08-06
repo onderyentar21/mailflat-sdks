@@ -1,8 +1,8 @@
-// MailFlat SDK hata tipleri — HTTP durum kodlarını anlamlı JS exception'larına çevirir.
+// MailFlat SDK error types — maps HTTP status codes to meaningful JS exceptions.
 //
 // Connected to:
 //   - used by:    client.ts, inbox.ts, index.ts
-//   - depends on: yok (saf)
+//   - depends on: none (pure)
 //
 // Key export: MailFlatError + alt tipleri (Authentication/Permission/NotFound/RateLimit/API/OTPTimeout/EncryptedInbox)
 
@@ -12,7 +12,7 @@ export class MailFlatError extends Error {
     super(message);
     this.name = "MailFlatError";
     this.statusCode = statusCode;
-    // TS'de Error subclass prototip zinciri düzeltmesi
+    // Restores the prototype chain for Error subclasses under TS
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -39,9 +39,12 @@ export class NotFoundError extends MailFlatError {
 }
 
 export class RateLimitError extends MailFlatError {
-  constructor(message: string, statusCode?: number) {
+  /** The server's `Retry-After` in seconds, when it sent one. */
+  retryAfter?: number;
+  constructor(message: string, statusCode?: number, retryAfter?: number) {
     super(message, statusCode);
     this.name = "RateLimitError";
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -66,8 +69,12 @@ export class EncryptedInboxError extends MailFlatError {
   }
 }
 
-// HTTP durum kodunu uygun MailFlatError alt tipine çevirip fırlatır.
-export function raiseForStatus(statusCode: number, detail: string): never {
+// Throws the matching MailFlatError subclass for an HTTP status code.
+export function raiseForStatus(
+  statusCode: number,
+  detail: string,
+  retryAfter?: number,
+): never {
   switch (statusCode) {
     case 401:
       throw new AuthenticationError(detail || "Invalid or missing API key", statusCode);
@@ -76,7 +83,7 @@ export function raiseForStatus(statusCode: number, detail: string): never {
     case 404:
       throw new NotFoundError(detail || "Not found", statusCode);
     case 429:
-      throw new RateLimitError(detail || "Rate limit exceeded", statusCode);
+      throw new RateLimitError(detail || "Rate limit exceeded", statusCode, retryAfter);
     default:
       throw new APIError(detail || `Request failed with status ${statusCode}`, statusCode);
   }

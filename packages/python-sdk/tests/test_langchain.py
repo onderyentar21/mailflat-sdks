@@ -1,7 +1,8 @@
-"""mailflat.langchain testleri — enjekte edilen mock client ile MailFlatToolkit araçları.
+"""mailflat.langchain tests — MailFlatToolkit tools driven by an injected mock client.
 
-`langchain-core` kuruluysa çalışır (yoksa atlanır). Her aracın doğru /api/v1 çağrısını yapıp
-beklenen sonucu döndürdüğü, toolkit'in 6 LangChain BaseTool ürettiği doğrulanır.
+Runs when `langchain-core` is installed (skipped otherwise). Verifies that each tool makes the
+right /api/v1 call and returns the expected result, and that the toolkit produces LangChain
+BaseTool objects.
 
 Connected to:
   - imports from: mailflat (SDK), mailflat.langchain, httpx
@@ -13,7 +14,7 @@ import json
 import httpx
 import pytest
 
-pytest.importorskip("langchain_core")  # extra kurulu değilse bu modülü atla
+pytest.importorskip("langchain_core")  # skip this module when the extra is not installed
 
 from mailflat import MailFlat
 from mailflat.langchain import MailFlatToolkit
@@ -22,7 +23,7 @@ ADDR = "signup-test@x7k2m.mailflat.net"
 
 
 def make_toolkit(handler) -> MailFlatToolkit:
-    """Verilen handler ile MockTransport kullanan bir MailFlatToolkit kurar."""
+    """Build a MailFlatToolkit backed by MockTransport using the given handler."""
     transport = httpx.MockTransport(handler)
     http = httpx.Client(
         transport=transport, base_url="https://mailflat.net", headers={"X-API-Key": "mf_test_x"}
@@ -46,7 +47,7 @@ def test_get_tools_returns_six_named_tools():
         "send_email",
         "delete_inbox",
     }
-    # Her araç bir açıklama + çağrılabilir args schema taşımalı (LangChain BaseTool).
+    # Every tool must carry a description and a usable args schema (LangChain BaseTool).
     for tool in tools.values():
         assert tool.description
         assert tool.args_schema is not None
@@ -144,3 +145,42 @@ def test_error_returned_not_raised():
     tools = _tools_by_name(make_toolkit(handler))
     out = tools["create_inbox"].invoke({"label": "x"})
     assert "Invalid API key" in out["error"]
+
+
+# ================================================== secret redaction (B-055)
+def test_tool_output_never_carries_the_inbox_api_key():
+    """🔒 LangChain tool output reaches the model (and LangSmith traces) — no keys allowed.
+
+    `create_inbox` used to return the backend payload as-is, and `list_inboxes` dumped every
+    inbox key on the account in a single call.
+    """
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/inboxes" and req.method == "POST":
+            return httpx.Response(200, json={
+                "ok": True, "address": ADDR, "name": "leak-test",
+                "api_key": "mf_sk_should_never_reach_the_model", "retention_hours": 2,
+            })
+        return httpx.Response(200, json={"ok": True, "inboxes": [
+            {"address": ADDR, "api_key": "mf_sk_one"},
+            {"address": "b@x.net", "api_key": "mf_sk_two"},
+        ]})
+
+    tools = _tools_by_name(make_toolkit(handler))
+
+    created = tools["create_inbox"].invoke({"label": "leak-test"})
+    assert "mf_sk_" not in json.dumps(created), created
+    assert created["address"] == ADDR and created["retention_hours"] == 2   # useful fields survive
+
+    listed = tools["list_inboxes"].invoke({})
+    assert "mf_sk_" not in json.dumps(listed), listed
+    assert [i["address"] for i in listed["inboxes"]] == [ADDR, "b@x.net"]
+
+
+def test_sdk_client_still_sees_the_key():
+    """The split: SDK = code surface (key present), tool = model surface (key absent)."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "address": ADDR, "api_key": "mf_sk_visible"})
+
+    toolkit = make_toolkit(handler)
+    inbox = toolkit._client.create(label="sdk-side")
+    assert inbox.api_key == "mf_sk_visible"

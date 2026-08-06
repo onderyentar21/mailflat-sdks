@@ -1,4 +1,4 @@
-// tsup build config — ESM + CJS + .d.ts çıktısı (Node 18+).
+// tsup build config — emits ESM + CJS + .d.ts (Node 18+).
 import { defineConfig } from "tsup";
 
 export default defineConfig({

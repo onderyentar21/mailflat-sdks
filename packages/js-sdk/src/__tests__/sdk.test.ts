@@ -1,7 +1,7 @@
-// @mailflat/sdk testleri — enjekte edilen mock fetch ile gerçek /api/v1 yanıtları taklit edilir.
+// @mailflat/sdk tests — real /api/v1 responses faked through an injected mock fetch.
 //
-// Kapsam: create/list/messages/latest/send/delete + waitForOtp (başarı/timeout/şifreli)
-// + hata eşlemesi (401/403/404/429) + env API key.
+// Covers: create/list/messages/latest/send/delete + waitForOtp (success/timeout/encrypted)
+// + error mapping (401/403/404/429) + the env API key.
 
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -24,7 +24,7 @@ function jsonResponse(status: number, body: any): Response {
   });
 }
 
-// Verilen handler'ı fetch olarak kullanan bir client kurar.
+// Build a client that uses the given handler as its fetch.
 function makeClient(handler: (url: string, init: RequestInit) => Response) {
   const fetchMock = vi.fn(async (url: any, init: any) => handler(String(url), init));
   return new MailFlat({ apiKey: "mf_test_x", fetch: fetchMock as any, maxRetries: 0 });
@@ -89,8 +89,9 @@ describe("list / messages / latest", () => {
       direction: "in",
       is_encrypted: false,
     };
+    // The URL now carries `?direction=in`, so match with includes rather than endsWith.
     const mf = makeClient((url) =>
-      url.endsWith("/messages")
+      url.includes("/messages")
         ? jsonResponse(200, { ok: true, emails: [email] })
         : jsonResponse(200, { ok: true, email }),
     );

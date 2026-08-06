@@ -1,16 +1,17 @@
-// @mailflat/ai-sdk — Vercel AI SDK için MailFlat tool suite.
+// @mailflat/ai-sdk — the MailFlat tool suite for the Vercel AI SDK.
 //
 // `npm i @mailflat/ai-sdk` → `import { mailflatToolSuite } from "@mailflat/ai-sdk"`.
-// `ai` (Vercel AI SDK) peer dependency'dir; tool nesneleri generateText/streamText'in
-// `tools` alanına yayılır.
+// `ai` (the Vercel AI SDK) is a peer dependency; the tool objects are spread into
+// spread into the `tools` field.
 //
 // Connected to:
 //   - depends on: tools.ts (→ @mailflat/sdk, zod)
-//   - used by:    kullanıcı kodu (Vercel AI SDK ajanları)
+//   - used by:    user code (Vercel AI SDK agents)
 //
 // Key export: mailflatToolSuite (+ tipler)
 
 export { mailflatToolSuite } from "./tools";
 export type { ToolSuiteOptions, MailFlatTool } from "./tools";
 
-export const VERSION = "0.1.0";
+// package.json ile AYNI olmak zorunda — `npm test` bunu kontrol eder (src/__tests__/version.test.ts).
+export const VERSION = "0.4.1";
