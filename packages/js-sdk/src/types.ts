@@ -3,7 +3,8 @@
 // Connected to:
 //   - used by:    client.ts, inbox.ts, index.ts
 //
-// Key export: Message, Attachment, CreateInboxOptions, WaitOptions, SendOptions, ReadOptions
+// Key export: Message, Attachment, OutgoingAttachment, CreateInboxOptions, WaitOptions,
+//             SendOptions, ReplyOptions, ReadOptions
 
 /** Which messages to read: received (default), sent, or both. */
 export type Direction = "in" | "out" | "all";
@@ -107,18 +108,49 @@ export interface WaitOptions {
   direction?: Direction;
 }
 
+/**
+ * One outgoing attachment.
+ *
+ * Give it `content` (bytes) or `contentBase64` (already encoded) — the SDK does the base64
+ * so an agent never has to.
+ *
+ * ⚠️ No file *paths* here, unlike the Python SDK: this package also runs in a browser,
+ * where there is no filesystem. Read the file yourself and pass the bytes.
+ */
+export interface OutgoingAttachment {
+  filename: string;
+  /** Raw bytes. */
+  content?: Uint8Array | ArrayBuffer;
+  /** Standard base64 of the file bytes (no `data:` prefix). */
+  contentBase64?: string;
+  /** Defaults to application/octet-stream when omitted. */
+  contentType?: string;
+}
+
 export interface SendOptions {
   subject?: string;
   body?: string;
   html?: string;
   /** Message-ID of the mail being answered — keeps the reply in the same thread. */
   inReplyTo?: string;
+  /** Copied recipients. They appear in the mail's headers. */
+  cc?: string[];
+  /** Blind-copied recipients. They never appear in the headers — not even in their copy. */
+  bcc?: string[];
+  /** Files to attach. Size and count limits depend on the plan. */
+  attachments?: OutgoingAttachment[];
 }
 
 export interface ReplyOptions {
   html?: string;
   /** Override the auto-generated `Re: …` subject. */
   subject?: string;
+  /** Copied recipients. They appear in the mail's headers. */
+  cc?: string[];
+  /** Blind-copied recipients. They never appear in the headers. */
+  bcc?: string[];
+  /** Files to attach — answering with a file is the normal case, not an edge case. */
+  attachments?: OutgoingAttachment[];
 }
 
 /** `Re:` prefix without doubling it up (clients also thread on the subject). */

@@ -9,19 +9,25 @@ Connected to:
 
 Key exports:
   - `Inbox` — `.address`, `.messages()`, `.latest()`, `.wait_for_message()`,
-    `.wait_for_otp()`, `.send()`, `.mark_read()`, `.burn()`, `.download_attachment()`
+    `.wait_for_otp()`, `.send()`, `.wait_until_sent()`, `.mark_read()`, `.burn()`,
+    `.download_attachment()`
   - `Message` — `.otp`, `.subject`, `.text`, `.html`, `.links`, `.attachments`, `.spam`, ...
   - `Attachment` — `.filename`, `.size_bytes`, `.download()`
 """
 from __future__ import annotations
 
+import base64
+import mimetypes
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from email.utils import parseaddr
 
-from .errors import EncryptedInboxError, MailFlatError, OTPTimeoutError
+from .errors import (EncryptedInboxError, MailFlatError, OTPTimeoutError, SendFailedError,
+                     SendTimeoutError)
 
 if TYPE_CHECKING:  # avoid a circular import (type hint only)
     from .client import MailFlat
@@ -41,6 +47,100 @@ def _reply_subject(subject: str | None) -> str:
     if not text:
         return "Re:"
     return text if text.lower().startswith("re:") else f"Re: {text}"
+
+
+def _encode_attachment(item: Any) -> dict[str, str]:
+    """One attachment → the wire shape `{filename, content_type, content_b64}`.
+
+    Accepts a filesystem path or a dict, because an agent should never have to base64 a
+    file by hand — hiding that is most of what an SDK is for. A path is the common case
+    (the file is on disk next to the agent) and the type is guessed from the extension so
+    the recipient's client shows a PDF as a PDF rather than a nameless blob.
+
+    The JS SDK deliberately does NOT accept paths: it can run in a browser, where there is
+    no filesystem. Same feature, different runtimes — see `docs`.
+    """
+    if isinstance(item, (str, os.PathLike)):
+        path = Path(item)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"Could not read attachment {path}: {exc}") from exc
+        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return {"filename": path.name, "content_type": ctype,
+                "content_b64": base64.b64encode(data).decode("ascii")}
+
+    if not isinstance(item, dict):
+        raise TypeError(
+            "Each attachment must be a file path or a dict with 'filename' and "
+            f"'content' (bytes) or 'content_b64' (str), got {type(item).__name__}.")
+
+    filename = str(item.get("filename") or "").strip()
+    if not filename:
+        raise ValueError("Attachment dicts need a 'filename'.")
+
+    if "content_b64" in item:
+        content_b64 = item["content_b64"]
+        if not isinstance(content_b64, str):
+            raise TypeError("'content_b64' must be a base64 string.")
+    else:
+        content = item.get("content")
+        if not isinstance(content, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"Attachment '{filename}' needs 'content' as bytes (or 'content_b64' as "
+                "a base64 string).")
+        content_b64 = base64.b64encode(bytes(content)).decode("ascii")
+
+    ctype = item.get("content_type") or mimetypes.guess_type(filename)[0] \
+        or "application/octet-stream"
+    return {"filename": filename, "content_type": ctype, "content_b64": content_b64}
+
+
+def _send_payload(to: str, subject: str, body: str, html: str | None,
+                  in_reply_to: str | None, cc: list[str] | None, bcc: list[str] | None,
+                  attachments: list[Any] | None) -> dict[str, Any]:
+    """Shared body builder for `send()` and `reply()`.
+
+    One builder because `reply()` must accept exactly what `send()` accepts (K6): an agent
+    answering a mail with an invoice attached is the normal case, not an edge case. Two
+    builders would drift the first time a field is added to one of them.
+    """
+    payload: dict[str, Any] = {"to": to, "subject": subject, "body": body}
+    if html is not None:
+        payload["html"] = html
+    if in_reply_to is not None:
+        payload["in_reply_to"] = in_reply_to
+    if cc:
+        payload["cc"] = list(cc)
+    if bcc:
+        payload["bcc"] = list(bcc)
+    if attachments:
+        payload["attachments"] = [_encode_attachment(a) for a in attachments]
+    return payload
+
+
+def otp_timeout_message(address: str, timeout: float, seen: dict[str, Any] | None) -> str:
+    """Timeout wording that distinguishes "nothing arrived" from "no code in it".
+
+    These are completely different problems and used to produce the same sentence: the user
+    went looking for a delivery failure while the message was sitting in the inbox with a
+    code the parser did not recognise (B-062).
+
+    Module level, not a method, because BOTH clients build this sentence. As a method the
+    async client would have to borrow it unbound — or, far more likely, grow its own copy
+    that slowly says something slightly different.
+    """
+    if not seen:
+        return f"No message arrived for {address} within {timeout}s"
+    subject = (seen.get("subject") or "(no subject)").strip()
+    snippet = " ".join((seen.get("body_text") or "").split())[:120]
+    return (
+        f"Mail arrived for {address} but no OTP could be extracted from it "
+        f"within {timeout}s. Newest message: {subject!r}"
+        + (f" — {snippet!r}" if snippet else "")
+        + ". Read inbox.latest().text and parse the code yourself, "
+        "and please report the format so we can support it."
+    )
 
 
 def _check_direction(direction: str) -> str:
@@ -180,7 +280,9 @@ class Message:
         return self.sender
 
     def reply(self, body: str = "", *, html: str | None = None,
-              subject: str | None = None) -> dict[str, Any]:
+              subject: str | None = None, cc: list[str] | None = None,
+              bcc: list[str] | None = None,
+              attachments: list[Any] | None = None) -> dict[str, Any]:
         """Reply to this message, keeping it in the same conversation.
 
         Fills in what a reply needs and is easy to get wrong by hand: the recipient, an
@@ -191,6 +293,10 @@ class Message:
         The recipient comes from `reply_to_address`, not from `.sender`: the envelope sender of
         transactional mail is usually a bounce address, so `send(to=msg.sender, ...)` quietly
         delivers the reply to a machine.
+
+        Takes everything `send()` takes, attachments included — answering a mail with a
+        file attached is the normal case, and an agent should not have to drop back to
+        `send()` (losing the threading headers) just to attach one.
         """
         if self._inbox is None:
             raise ValueError(
@@ -205,6 +311,9 @@ class Message:
             body=body,
             html=html,
             in_reply_to=self.message_id,
+            cc=cc,
+            bcc=bcc,
+            attachments=attachments,
         )
 
     def mark_read(self) -> dict[str, Any]:
@@ -285,6 +394,17 @@ class Inbox:
             f"/api/v1/inboxes/{self.address}/messages?direction={direction}")
         return [self._wrap(e) for e in (res.get("emails") or [])]
 
+    def message(self, message_id: int) -> Message:
+        """Fetch one message by id — the way to ask "what happened to this send?".
+
+        Without it the only way to check a sent mail's status was to pull the whole
+        outbound list and find the id by hand, which for an agent that sent 100 mails
+        meant 100 messages per check.
+        """
+        res = self._client._get(
+            f"/api/v1/inboxes/{self.address}/messages/{message_id}")
+        return self._wrap(res.get("email") or {})
+
     def latest(self, *, direction: str = "in") -> Message | None:
         """Return the most recent message, or None when the inbox is empty.
 
@@ -355,23 +475,8 @@ class Inbox:
             time.sleep(poll_interval)
 
     def _otp_timeout_message(self, timeout: float, seen: dict[str, Any] | None) -> str:
-        """Build a timeout message that distinguishes "nothing arrived" from "no code in it".
-
-        These are completely different problems and used to produce the same sentence: the
-        user went looking for a delivery failure while the message was sitting in the inbox
-        with a code the parser did not recognise.
-        """
-        if not seen:
-            return f"No message arrived for {self.address} within {timeout}s"
-        subject = (seen.get("subject") or "(no subject)").strip()
-        snippet = " ".join((seen.get("body_text") or "").split())[:120]
-        return (
-            f"Mail arrived for {self.address} but no OTP could be extracted from it "
-            f"within {timeout}s. Newest message: {subject!r}"
-            + (f" — {snippet!r}" if snippet else "")
-            + ". Read inbox.latest().text and parse the code yourself, "
-            "and please report the format so we can support it."
-        )
+        """Kept as a method for compatibility; the wording itself is shared (see below)."""
+        return otp_timeout_message(self.address, timeout, seen)
 
     def download_attachment(self, message_id: int, attachment_id: int) -> bytes:
         """Download one attachment's bytes.
@@ -394,9 +499,27 @@ class Inbox:
     # ----------------------------------------------------------------- yazma
     def send(
         self, to: str, *, subject: str = "", body: str = "", html: str | None = None,
-        in_reply_to: str | None = None,
+        in_reply_to: str | None = None, cc: list[str] | None = None,
+        bcc: list[str] | None = None, attachments: list[Any] | None = None,
     ) -> dict[str, Any]:
         """Send mail from this inbox's address (DKIM-signed, through our own MTA).
+
+        Returns as soon as the mail is **accepted for delivery** — not once it is
+        delivered. Delivery happens on a queue, so the response carries `message_id` and
+        `queued: true`; use `wait_until_sent(message_id)` (or a `message.delivered`
+        webhook) to find out how it ended. Blocking here would put back the exact stall
+        the queue was built to remove.
+
+        `attachments` takes file paths or dicts — the base64 encoding is done here:
+
+            inbox.send(to, attachments=["/tmp/invoice.pdf"])
+            inbox.send(to, attachments=[{"filename": "a.pdf", "content": raw_bytes}])
+
+        Size and count limits depend on the plan (free is deliberately small); going over
+        raises with the limit spelled out rather than silently dropping the file.
+
+        `bcc` recipients receive the mail but never appear in its headers — not even in
+        their own copy.
 
         Pass `in_reply_to` (a `Message-ID`) to keep the mail in an existing conversation;
         without it the recipient's client starts a new thread. `Message.reply()` fills this
@@ -404,12 +527,39 @@ class Inbox:
 
         Not retried on gateway errors: a retried send can deliver the same mail twice.
         """
-        payload: dict[str, Any] = {"to": to, "subject": subject, "body": body}
-        if html is not None:
-            payload["html"] = html
-        if in_reply_to is not None:
-            payload["in_reply_to"] = in_reply_to
+        payload = _send_payload(to, subject, body, html, in_reply_to, cc, bcc, attachments)
         return self._client._post(f"/api/v1/inboxes/{self.address}/send", payload)
+
+    def wait_until_sent(self, message_id: int, *, timeout: float = 120.0,
+                        poll_interval: float = 2.0) -> Message:
+        """Block until a sent mail reaches a final delivery state.
+
+        `send()` is asynchronous, so "did it actually go out?" has no synchronous answer.
+        This polls the message until the server reports one, which is the pull half of the
+        contract (the push half is the `message.delivered` / `message.failed` webhook —
+        prefer that when you can receive one).
+
+        Returns the message on success. Raises `SendFailedError` if delivery permanently
+        failed and `SendTimeoutError` if it is still queued when the timeout elapses.
+        It does NOT return quietly on failure: a helper called `wait_until_sent` that
+        hands back a failed mail as if nothing happened is how mail goes missing.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            message = self.message(message_id)
+            status = message.send_status
+            if status in ("sent", "unsigned"):
+                return message
+            if status == "failed":
+                raise SendFailedError(
+                    message.send_error or "Delivery failed",
+                    message_id=message_id, status=status)
+            if time.monotonic() >= deadline:
+                raise SendTimeoutError(
+                    f"Message {message_id} was still {status or 'queued'} after "
+                    f"{timeout:g}s. It may still be delivered; the queue keeps retrying.",
+                    message_id=message_id, status=status)
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
     def mark_read(self, message_id: int) -> dict[str, Any]:
         """Mark one message as read.

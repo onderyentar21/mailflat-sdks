@@ -4,7 +4,8 @@
 //   - used by:    client.ts, inbox.ts, index.ts
 //   - depends on: none (pure)
 //
-// Key export: MailFlatError + alt tipleri (Authentication/Permission/NotFound/RateLimit/API/OTPTimeout/EncryptedInbox)
+// Key export: MailFlatError and its subtypes (Authentication/Permission/NotFound/RateLimit/
+// API/OTPTimeout/SendFailed/SendTimeout/EncryptedInbox)
 
 export class MailFlatError extends Error {
   statusCode?: number;
@@ -59,6 +60,47 @@ export class OTPTimeoutError extends MailFlatError {
   constructor(message: string) {
     super(message);
     this.name = "OTPTimeoutError";
+  }
+}
+
+/**
+ * Base for the two ways `waitUntilSent()` can end badly.
+ *
+ * Deliberately separate from OTPTimeoutError: that one means "the mail I was waiting for
+ * never arrived", these mean "the mail I sent did not go out". One name for both would let
+ * a single catch hide two unrelated faults.
+ */
+export class SendError extends MailFlatError {
+  /** Id of the message being watched. */
+  messageId?: number;
+  /** Last delivery status seen — "queued" on timeout, "failed" on failure. */
+  status?: string;
+  constructor(message: string, messageId?: number, status?: string) {
+    super(message);
+    this.name = "SendError";
+    this.messageId = messageId;
+    this.status = status;
+  }
+}
+
+/** Delivery permanently failed; the queue will not retry it. */
+export class SendFailedError extends SendError {
+  constructor(message: string, messageId?: number, status?: string) {
+    super(message, messageId, status);
+    this.name = "SendFailedError";
+  }
+}
+
+/**
+ * Still queued when `waitUntilSent()` gave up.
+ *
+ * NOT the same as failure: the queue keeps retrying with exponential backoff, so the mail
+ * may still be delivered. Greylisting alone can hold a mail for several minutes.
+ */
+export class SendTimeoutError extends SendError {
+  constructor(message: string, messageId?: number, status?: string) {
+    super(message, messageId, status);
+    this.name = "SendTimeoutError";
   }
 }
 

@@ -186,9 +186,14 @@ class MailFlatTest {
     // ------------------------------------------------------------------ send
     @Test
     void sendPostsPayload() throws Exception {
-        responder = (m, p, b) -> Resp.ok("{\"ok\":true,\"status\":\"sent\"}");
-        JsonNode res = client().inbox(ADDR).send("x@y.com", "Hi", "Yo");
-        assertEquals("sent", res.get("status").asText());
+        // The real endpoint answers 202 with `queued`, never `status: sent` — the fake used
+        // to claim a delivery the server does not promise (B-059: a fake that lies about the
+        // contract tests our idea of the server, not the server).
+        responder = (m, p, b) -> new Resp(202, "{\"ok\":true,\"queued\":true,\"message_id\":41,"
+                + "\"message\":\"Accepted for delivery to x@y.com\"}");
+        SendResult res = client().inbox(ADDR).send("x@y.com", "Hi", "Yo");
+        assertEquals(41, res.messageId());
+        assertTrue(res.queued());
         assertEquals("/api/v1/inboxes/" + ADDR + "/send", lastPath);
         JsonNode body = parse(lastBody);
         assertEquals("x@y.com", body.get("to").asText());

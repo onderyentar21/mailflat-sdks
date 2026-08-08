@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   MailFlat Java SDK — Maven build.
-  Connected to: deploy/backup_db.sh yok; /api/v1 Agent API'sini sarar (Python/JS SDK ikizi).
+  Connected to: the /api/v1 Agent API, which it wraps (twin of the Python and JS SDKs).
   Coordinates: net.mailflat:mailflat-sdk. Runtime dep: Jackson (JSON). Test: JUnit 5 (+ JDK HttpServer).
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -11,7 +11,7 @@
 
   <groupId>net.mailflat</groupId>
   <artifactId>mailflat-sdk</artifactId>
-  <version>0.3.0</version>
+  <version>0.4.0</version>
   <packaging>jar</packaging>
 
   <name>MailFlat Java SDK</name>

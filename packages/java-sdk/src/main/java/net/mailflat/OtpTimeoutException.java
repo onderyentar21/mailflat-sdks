@@ -1,4 +1,4 @@
-// No OTP / message arrived before the timeout. (MailFlatException alt tipi.)
+// No OTP / message arrived before the timeout. (A MailFlatException subtype.)
 package net.mailflat;
 
 public class OtpTimeoutException extends MailFlatException {

@@ -69,8 +69,14 @@ SDK in tests without a network (e.g. `httpx.MockTransport`).
 - `.latest(*, direction="in") -> Message | None` — most recent message.
 - `.wait_for_otp(*, timeout=30, poll_interval=1.0) -> str` — poll until an OTP arrives; returns the code.
 - `.wait_for_message(*, timeout=30, poll_interval=1.0, direction="in") -> Message` — poll until a message arrives.
-- `.send(to, *, subject="", body="", html=None, in_reply_to=None) -> dict` — send a
-  DKIM-signed email from this inbox. Pass `in_reply_to` (a `Message-ID`) to stay in a thread.
+- `.send(to, *, subject="", body="", html=None, in_reply_to=None, cc=None, bcc=None, attachments=None) -> dict` —
+  send a DKIM-signed email from this inbox. Returns once the mail is **accepted for
+  delivery**, not once it is delivered (see below). Pass `in_reply_to` (a `Message-ID`) to
+  stay in a thread.
+- `.message(message_id) -> Message` — fetch one message; the way to check what happened to a send.
+- `.wait_until_sent(message_id, *, timeout=120, poll_interval=2.0) -> Message` — block until
+  delivery finishes. Raises `SendFailedError` if it permanently failed, `SendTimeoutError`
+  if it is still queued at the deadline.
 - `.mark_read(message_id) -> dict` — mark a message read so later polls can skip it.
 - `.burn() -> dict` — delete every message but keep the address.
 - `.download_attachment(message_id, attachment_id) -> bytes` — fetch an attachment's bytes.
@@ -91,8 +97,6 @@ SDK in tests without a network (e.g. `httpx.MockTransport`).
 
 - `.links` — URLs found in the body (HTML hrefs first). For "click the verification link" flows.
 - `.attachments` — metadata; `msg.attachments[0].download()` fetches the bytes.
-  ⚠️ `send()` cannot attach files yet, so you cannot produce an attachment from the SDK
-  alone — send one from a normal mail client to test this path.
 - `.spam` — `{score, required, is_spam, rules, scanner}`, or `None` when never scanned
   (which is not the same as a score of 0). ⚠️ Spam scanning is currently **disabled** on
   mailflat.net, so today this is `None` for every message.
@@ -104,6 +108,65 @@ SDK in tests without a network (e.g. `httpx.MockTransport`).
   `References` headers Gmail and Outlook thread on. A hand-rolled `send()` starts a new
   conversation instead, which does not look like a reply.
 - `.mark_read()` / `.delete()` — act on this message directly.
+
+## Async
+
+Everything above has an `asyncio` twin. Real async I/O, not a thread wrapper — an agent
+watching a fleet of inboxes runs them on one event loop instead of holding a thread per
+`wait_for_otp`:
+
+```python
+import asyncio
+from mailflat.aio import AsyncMailFlat
+
+async def main():
+    async with AsyncMailFlat() as mf:
+        inboxes = await asyncio.gather(*(mf.create(label=f"user-{i}") for i in range(20)))
+        codes = await asyncio.gather(*(i.wait_for_otp(timeout=60) for i in inboxes))
+        return codes
+
+asyncio.run(main())
+```
+
+`AsyncMailFlat` mirrors `MailFlat` method for method, with the same keyword arguments and
+the same rules — retries, `Retry-After`, error types and timeout wording are shared code,
+not two copies. LangChain agents get `AsyncMailFlatToolkit`, which binds `coroutine=` on
+every tool so `ainvoke` awaits instead of parking a thread.
+
+## Attachments, cc and bcc
+
+```python
+inbox.send(
+    "customer@example.com",
+    subject="Your invoice",
+    body="Attached.",
+    cc=["billing@example.com"],
+    bcc=["audit@example.com"],
+    attachments=["/tmp/invoice.pdf"],          # a path — the SDK reads and encodes it
+)
+```
+
+An attachment can be a file path, `{"filename": ..., "content": b"..."}`, or
+`{"filename": ..., "content_b64": "..."}`. Size and count limits depend on your plan
+(the free plan is deliberately small); going over raises with the limit spelled out
+rather than silently dropping the file.
+
+`bcc` recipients receive the mail but never appear in its headers — not even in their own
+copy. `reply()` accepts all three too, so you can answer a thread with a file attached.
+
+## Did it actually go out?
+
+`send()` returns as soon as the mail is **accepted**; delivery runs on a queue, so nothing
+is delivered yet when it returns:
+
+```python
+res = inbox.send("customer@example.com", subject="Your invoice",
+                 attachments=["/tmp/invoice.pdf"])
+inbox.wait_until_sent(res["message_id"], timeout=120)   # raises if it failed
+```
+
+For anything long-running, subscribe to the `message.delivered` / `message.failed`
+webhooks instead of polling.
 
 ## Errors
 

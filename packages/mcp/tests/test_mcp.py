@@ -68,8 +68,13 @@ class FakeBackend:
                 "id": 99, "direction": "out", "to_address": body["to"],
                 "subject": body.get("subject"), "body_text": body.get("body"),
                 "otp_code": None, "is_encrypted": False,
+                "cc": body.get("cc", []), "bcc": body.get("bcc", []),
                 "headers": {"In-Reply-To": body["in_reply_to"]} if body.get("in_reply_to") else None})
-            return httpx.Response(200, json={"ok": True, "message": f"Sent to {body['to']}"})
+            # 202, not 200 — the real endpoint ACCEPTS the mail and delivers it on a queue.
+            # A fake answering 200 would let a client that chokes on 202 pass here (B-059:
+            # a fake that does not mimic the real contract passes tests for the wrong reason).
+            return httpx.Response(202, json={"ok": True, "queued": True, "message_id": 99,
+                                             "message": f"Accepted for delivery to {body['to']}"})
         if method == "DELETE" and path.startswith("/api/v1/inboxes/"):
             addr = path.split("/api/v1/inboxes/")[1]
             self.inboxes.pop(addr, None)
@@ -143,6 +148,41 @@ def test_mcp_send_email(patched):
     assert len(out) == 1 and out[0]["to_address"] == "customer@example.com"
     # …and the default read does NOT see it, so an agent cannot mistake its own mail for a reply.
     assert server.read_messages(addr)["emails"] == []
+
+
+def test_mcp_send_email_passes_cc_and_bcc_through(patched):
+    """cc/bcc reach the wire under their real names — a rename here fails as a 422."""
+    addr = server.create_inbox(label="cc-sender")["address"]
+    server.send_email(addr, to="a@example.com", body="hi",
+                      cc=["watcher@example.com"], bcc=["secret@example.com"])
+    body = patched.sent[-1]
+    assert body["cc"] == ["watcher@example.com"]
+    assert body["bcc"] == ["secret@example.com"]
+
+
+def test_mcp_reply_passes_cc_and_bcc_through(patched):
+    addr = server.create_inbox(label="cc-replier")["address"]
+    patched.deliver(addr, id=77, sender="human@gmail.com", subject="Q",
+                    body_text="?", headers={"Message-ID": "<q@gmail.com>"})
+    server.reply(addr, 77, body="a", cc=["boss@example.com"], bcc=["audit@example.com"])
+    body = patched.sent[-1]
+    assert body["cc"] == ["boss@example.com"] and body["bcc"] == ["audit@example.com"]
+    assert body["in_reply_to"] == "<q@gmail.com>"      # still threaded
+
+
+def test_model_facing_tools_take_no_attachments():
+    """🔒 K7: file bytes must never cross the MODEL surface.
+
+    cc/bcc are addresses — short strings a model can reasonably choose. An attachment is
+    bytes: it would have to pass through the model's context, costing tokens and being
+    plainly impossible for a multi-megabyte file. Files are attached from the SDK
+    (`inbox.send(..., attachments=[...])`), which is code, not a model decision.
+    """
+    import inspect
+    for tool in (server.send_email, server.reply):
+        params = inspect.signature(tool).parameters
+        assert "attachments" not in params, f"{tool.__name__} exposes attachments to the model"
+        assert "cc" in params and "bcc" in params, f"{tool.__name__} is missing cc/bcc"
 
 
 def test_mcp_wait_for_message_ignores_own_outbound(patched):

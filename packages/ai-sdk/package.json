@@ -1,6 +1,6 @@
 {
   "name": "@mailflat/ai-sdk",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "MailFlat tool suite for the Vercel AI SDK — give any model real disposable inboxes with one-line OTP retrieval.",
   "keywords": [
     "vercel-ai-sdk",
@@ -48,7 +48,7 @@
     "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
-    "@mailflat/sdk": "^0.4.1",
+    "@mailflat/sdk": "^0.5.0",
     "zod": "^3.23.0"
   },
   "peerDependencies": {

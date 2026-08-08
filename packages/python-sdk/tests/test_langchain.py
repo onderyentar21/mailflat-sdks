@@ -36,7 +36,15 @@ def _tools_by_name(toolkit: MailFlatToolkit) -> dict:
 
 
 # --------------------------------------------------------------------- shape
-def test_get_tools_returns_six_named_tools():
+def test_get_tools_returns_the_full_named_tool_set():
+    """The toolkit's tool set is fixed here on purpose — a tool appearing or disappearing
+    changes what the model can do, which is a product change, not an implementation detail.
+
+    ⚠️ This lock was RED and unnoticed: it still asserted the six tools of an early version
+    while the toolkit had grown to ten (`wait_for_message`, `reply`, `mark_read`,
+    `burn_inbox` were added without updating it). A shape lock nobody runs locks nothing —
+    see the note about `packages/` tests in projectMDs/214.
+    """
     toolkit = make_toolkit(lambda req: httpx.Response(200, json={}))
     tools = _tools_by_name(toolkit)
     assert set(tools) == {
@@ -44,9 +52,16 @@ def test_get_tools_returns_six_named_tools():
         "list_inboxes",
         "read_messages",
         "wait_for_otp",
+        "wait_for_message",
         "send_email",
+        "reply",
+        "mark_read",
+        "burn_inbox",
         "delete_inbox",
     }
+    # delete_message is deliberately absent: a model that can delete single messages can
+    # destroy evidence of what it did.
+    assert "delete_message" not in tools
     # Every tool must carry a description and a usable args schema (LangChain BaseTool).
     for tool in tools.values():
         assert tool.description
@@ -125,6 +140,35 @@ def test_send_email():
         {"address": ADDR, "to": "x@y.com", "subject": "Hi", "body": "Yo"}
     )
     assert out["status"] == "sent"
+
+
+def test_send_email_passes_cc_and_bcc():
+    """cc/bcc reach the wire under their real names — a rename here surfaces as a 422."""
+    seen: list[dict] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(req.content))
+        return httpx.Response(202, json={"ok": True, "queued": True, "message_id": 3})
+
+    tools = _tools_by_name(make_toolkit(handler))
+    tools["send_email"].invoke({"address": ADDR, "to": "x@y.com", "body": "Yo",
+                                "cc": ["w@y.com"], "bcc": ["s@y.com"]})
+    assert seen[0]["cc"] == ["w@y.com"] and seen[0]["bcc"] == ["s@y.com"]
+
+
+def test_model_facing_tools_take_no_attachments():
+    """🔒 K7: file bytes must never cross the MODEL surface.
+
+    cc/bcc are addresses — short strings a model can reasonably choose. An attachment is
+    bytes: it would travel through the model's context, costing tokens and being plainly
+    impossible for a multi-megabyte file. Files are attached from the SDK
+    (`inbox.send(..., attachments=[...])`), which is code, not a model decision.
+    """
+    tools = _tools_by_name(make_toolkit(lambda req: httpx.Response(200, json={})))
+    for name in ("send_email", "reply"):
+        fields = set(tools[name].args_schema.model_json_schema()["properties"])
+        assert "attachments" not in fields, f"{name} exposes attachments to the model"
+        assert {"cc", "bcc"} <= fields, f"{name} is missing cc/bcc"
 
 
 # ------------------------------------------------------------------- delete

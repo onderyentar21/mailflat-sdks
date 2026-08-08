@@ -22,35 +22,13 @@ from typing import Any
 
 import httpx
 
+from ._http import backoff_delay, error_detail, interpret, retry_after_seconds, should_retry
 from .errors import MailFlatError, raise_for_status
 from .inbox import Inbox
 
 DEFAULT_BASE_URL = "https://mailflat.net"
-_RETRY_STATUSES = {429, 502, 503, 504}
-
-# Only side-effect-free (idempotent) methods are retried. POST is deliberately excluded:
-# if the MTA accepts a /send and the gateway then returns 504, a retry delivers THE SAME
-# MAIL TWICE and the user never finds out. POST stays single-shot until we support
-# Idempotency-Key.
-_IDEMPOTENT_METHODS = {"GET", "HEAD", "DELETE"}
-
-_MAX_BACKOFF = 8.0
 
 logger = logging.getLogger("mailflat")
-
-
-def _retry_after_seconds(resp: httpx.Response) -> float | None:
-    """Parse the `Retry-After` header (seconds form). Returns None when absent/unparsable."""
-    # Coming back after 1s when the server said "wait 12s" both earns another 429 and
-    # stretches the rate-limit window.
-    raw = resp.headers.get("Retry-After")
-    if not raw:
-        return None
-    try:
-        return max(0.0, float(raw.strip()))
-    except (TypeError, ValueError):
-        # The HTTP-date form is valid but rare; rather than guess, fall back to our backoff.
-        return None
 
 
 class MailFlat:
@@ -124,17 +102,10 @@ class MailFlat:
             except httpx.HTTPError as exc:  # network / timeout
                 raise MailFlatError(f"Network error: {exc}") from exc
 
-            retry_after = _retry_after_seconds(resp)
-            can_repeat = method.upper() in _IDEMPOTENT_METHODS if idempotent is None else idempotent
-            retriable = (
-                resp.status_code in _RETRY_STATUSES
-                and can_repeat
-                and attempt < self.max_retries
-            )
-            if retriable:
+            retry_after = retry_after_seconds(resp.headers)
+            if should_retry(resp.status_code, method, idempotent, attempt, self.max_retries):
                 attempt += 1
-                delay = retry_after if retry_after is not None else min(2 ** attempt * 0.5, _MAX_BACKOFF)
-                delay = min(delay, _MAX_BACKOFF)
+                delay = backoff_delay(attempt, retry_after)
                 logger.debug("retrying %s %s after %s (status %s, attempt %s/%s)",
                              method, path, delay, resp.status_code, attempt, self.max_retries)
                 time.sleep(delay)
@@ -146,15 +117,9 @@ class MailFlat:
                 data = {}
 
             if resp.status_code >= 400:
-                detail = ""
-                if isinstance(data, dict):
-                    detail = data.get("detail") or data.get("error") or ""
-                logger.debug("%s %s failed with %s: %s", method, path, resp.status_code, detail)
-                raise_for_status(resp.status_code, detail, retry_after=retry_after)
-
-            if isinstance(data, dict) and data.get("error"):  # safety net: 200 + error
-                raise MailFlatError(data["error"], status_code=resp.status_code)
-            return data if isinstance(data, dict) else {}
+                logger.debug("%s %s failed with %s: %s", method, path, resp.status_code,
+                             error_detail(data))
+            return interpret(resp.status_code, data, retry_after=retry_after)
 
     def _get(self, path: str) -> dict[str, Any]:
         return self._request("GET", path)
@@ -179,23 +144,21 @@ class MailFlat:
                 resp = self._http.request("GET", path)
             except httpx.HTTPError as exc:
                 raise MailFlatError(f"Network error: {exc}") from exc
-            retry_after = _retry_after_seconds(resp)
-            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
+            retry_after = retry_after_seconds(resp.headers)
+            if should_retry(resp.status_code, "GET", None, attempt, self.max_retries):
                 attempt += 1
-                delay = retry_after if retry_after is not None else min(2 ** attempt * 0.5, _MAX_BACKOFF)
+                delay = backoff_delay(attempt, retry_after)
                 logger.debug("retrying GET %s after %s (status %s)", path, delay, resp.status_code)
-                time.sleep(min(delay, _MAX_BACKOFF))
+                time.sleep(delay)
                 continue
             break
         if resp.status_code >= 400:
-            detail = ""
             try:
                 body = resp.json()
-                if isinstance(body, dict):
-                    detail = body.get("detail") or body.get("error") or ""
             except ValueError:
-                pass
-            raise_for_status(resp.status_code, detail, retry_after=_retry_after_seconds(resp))
+                body = {}
+            raise_for_status(resp.status_code, error_detail(body),
+                             retry_after=retry_after_seconds(resp.headers))
         return resp
 
     # --------------------------------------------------------------- public

@@ -4,9 +4,10 @@
 //
 // Connected to:
 //   - used by:    MailFlat (creates it), user code
-//   - depends on: MailFlat (HTTP), Message, exceptions, Jackson
+//   - depends on: MailFlat (HTTP), Message, SendOptions, SendResult, exceptions, Jackson
 //
-// Key export: Inbox — address(), messages(), latest(), waitForOtp(), send(), delete()
+// Key export: Inbox — address(), messages(), message(id), latest(), waitForOtp(),
+//                     send(to, SendOptions), waitUntilSent(), delete()
 package net.mailflat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -18,6 +19,9 @@ import java.util.Optional;
 /** A single disposable inbox. Obtain it from {@link MailFlat}, don't construct directly. */
 public final class Inbox {
     private static final long DEFAULT_POLL_MILLIS = 1000L;
+    /** Delivery is slower than arrival, so polling it every second only burns requests. */
+    private static final long SEND_POLL_MILLIS = 2000L;
+    private static final int DEFAULT_SEND_TIMEOUT_SECONDS = 120;
 
     private final MailFlat client;
     private final String address;
@@ -187,14 +191,27 @@ public final class Inbox {
                 + "and please report the format so we can support it.";
     }
 
+    /**
+     * Fetch one message by id — the way to ask "what happened to that send?".
+     *
+     * <p>Without it the only way to check a sent mail was to pull the whole outbound list and
+     * find the id by hand, which for an agent that sent 100 mails means 100 messages per check.
+     */
+    public Message message(int messageId) {
+        JsonNode res = client.get("/api/v1/inboxes/" + address + "/messages/" + messageId);
+        JsonNode email = res.get("email");
+        return attach(Message.fromJson(email != null && !email.isNull()
+                ? email : client.json().createObjectNode()));
+    }
+
     // ------------------------------------------------------------------- write
     /** Send a DKIM-signed email from this inbox (plain text). */
-    public JsonNode send(String to, String subject, String body) {
+    public SendResult send(String to, String subject, String body) {
         return send(to, subject, body, null);
     }
 
     /** Send a DKIM-signed email from this inbox; {@code html} is optional (null = plain only). */
-    public JsonNode send(String to, String subject, String body, String html) {
+    public SendResult send(String to, String subject, String body, String html) {
         return send(to, subject, body, html, null);
     }
 
@@ -204,21 +221,105 @@ public final class Inbox {
      * <p>Pass {@code inReplyTo} (a {@code Message-ID}) to keep the mail in the same thread;
      * without it the recipient's client starts a new one. {@link Message#reply(String)}
      * fills this in for you.
+     */
+    public SendResult send(String to, String subject, String body, String html, String inReplyTo) {
+        return send(to, SendOptions.builder()
+                .subject(subject).body(body).html(html).inReplyTo(inReplyTo).build());
+    }
+
+    /**
+     * Send with everything a mail can carry: cc, bcc, attachments, threading.
+     *
+     * <pre>{@code
+     * SendResult r = inbox.send("finance@acme.com", SendOptions.builder()
+     *         .subject("Invoice")
+     *         .body("Attached.")
+     *         .cc("cc@acme.com")
+     *         .attach(Path.of("/tmp/invoice.pdf"))
+     *         .build());
+     * inbox.waitUntilSent(r);
+     * }</pre>
+     *
+     * <p>Returns as soon as the mail is <em>accepted for delivery</em> (HTTP 202) — not once
+     * it is delivered. Delivery runs on a queue; ask {@link #waitUntilSent(SendResult)} or
+     * subscribe to the {@code message.delivered} / {@code message.failed} webhook for the
+     * outcome. Blocking here would put back the exact stall the queue was built to remove.
+     *
+     * <p>Attachment size and count depend on your plan (free is deliberately small); going
+     * over is rejected with the limit spelled out rather than silently dropping the file.
      *
      * <p>Not retried on gateway errors: a retried send delivers the same mail twice.
      */
-    public JsonNode send(String to, String subject, String body, String html, String inReplyTo) {
-        ObjectNode payload = client.json().createObjectNode();
-        payload.put("to", to);
-        payload.put("subject", subject != null ? subject : "");
-        payload.put("body", body != null ? body : "");
-        if (html != null) {
-            payload.put("html", html);
+    public SendResult send(String to, SendOptions options) {
+        return sendReply(to, options, null, null);
+    }
+
+    /**
+     * The one place a send actually goes out; {@link Message#reply(SendOptions)} comes through
+     * here too, with the two fields a reply owns (recipient subject, In-Reply-To) overridden.
+     * One path, so a field added to a send cannot quietly miss replies.
+     */
+    SendResult sendReply(String to, SendOptions options, String subjectOverride,
+                         String inReplyToOverride) {
+        SendOptions opts = options != null ? options : SendOptions.builder().build();
+        ObjectNode payload = opts.toPayload(client.json(), to, subjectOverride, inReplyToOverride);
+        return new SendResult(client.post("/api/v1/inboxes/" + address + "/send", payload));
+    }
+
+    /** Wait (up to 120s) for a mail to reach a final delivery state. */
+    public Message waitUntilSent(int messageId) {
+        return waitUntilSent(messageId, DEFAULT_SEND_TIMEOUT_SECONDS);
+    }
+
+    /** Wait for the mail this send accepted to reach a final delivery state. */
+    public Message waitUntilSent(SendResult result) {
+        return waitUntilSent(result.requireMessageId(), DEFAULT_SEND_TIMEOUT_SECONDS);
+    }
+
+    /** Wait for the mail this send accepted, with your own timeout. */
+    public Message waitUntilSent(SendResult result, int timeoutSeconds) {
+        return waitUntilSent(result.requireMessageId(), timeoutSeconds);
+    }
+
+    /**
+     * Block until a sent mail reaches a final delivery state, then return it.
+     *
+     * <p>{@code send()} is asynchronous, so "did it actually go out?" has no synchronous
+     * answer. This polls the message until the server reports one; it is the pull half of the
+     * contract, the push half being the {@code message.delivered} / {@code message.failed}
+     * webhook (prefer that when you can receive one).
+     *
+     * <p>It does NOT return quietly on failure: a helper called {@code waitUntilSent} that
+     * hands back a failed mail as if nothing happened is how mail goes missing.
+     *
+     * @throws SendFailedException  if delivery permanently failed
+     * @throws SendTimeoutException if it is still queued when the timeout elapses. That is
+     *                              not a failure — the queue keeps retrying, and a caller who
+     *                              reads it as one and sends again delivers the mail twice.
+     */
+    public Message waitUntilSent(int messageId, int timeoutSeconds) {
+        long deadline = System.nanoTime() + timeoutSeconds * 1_000_000_000L;
+        while (true) {
+            Message message = message(messageId);
+            String status = message.sendStatus();
+            if ("sent".equals(status) || "unsigned".equals(status)) {
+                return message;
+            }
+            if ("failed".equals(status)) {
+                String reason = message.sendError();
+                throw new SendFailedException(
+                        reason != null && !reason.isEmpty() ? reason : "Delivery failed",
+                        messageId, status);
+            }
+            if (System.nanoTime() >= deadline) {
+                throw new SendTimeoutException(
+                        "Message " + messageId + " was still " + (status != null ? status : "queued")
+                                + " after " + timeoutSeconds + "s. It may still be delivered; "
+                                + "the queue keeps retrying.",
+                        messageId, status);
+            }
+            sleep(SEND_POLL_MILLIS);
         }
-        if (inReplyTo != null) {
-            payload.put("in_reply_to", inReplyTo);
-        }
-        return client.post("/api/v1/inboxes/" + address + "/send", payload);
     }
 
     /**
@@ -281,8 +382,12 @@ public final class Inbox {
     }
 
     private void sleep() {
+        sleep(DEFAULT_POLL_MILLIS);
+    }
+
+    private void sleep(long millis) {
         try {
-            Thread.sleep(DEFAULT_POLL_MILLIS);
+            Thread.sleep(millis);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new MailFlatException("Interrupted while polling " + address);

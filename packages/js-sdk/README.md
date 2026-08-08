@@ -58,7 +58,13 @@ Use `baseUrl` for self-hosted / BYOD deployments (default `https://mailflat.net`
 - `.latest({ direction? }) => Promise<Message | null>` — most recent message.
 - `.waitForOtp({ timeout?, pollInterval? }) => Promise<string>` — poll until an OTP arrives; returns the code. `timeout` is in **ms** (default 30000).
 - `.waitForMessage({ timeout?, pollInterval?, direction? }) => Promise<Message>` — poll until any message arrives.
-- `.send(to, { subject?, body?, html? }) => Promise<...>` — send a DKIM-signed email from this inbox.
+- `.send(to, { subject?, body?, html?, cc?, bcc?, attachments? }) => Promise<...>` — send a
+  DKIM-signed email from this inbox. Resolves once the mail is **accepted for delivery**,
+  not once it is delivered (see below).
+- `.message(messageId) => Promise<Message>` — fetch one message; how you check what happened to a send.
+- `.waitUntilSent(messageId, { timeout?, pollInterval? }) => Promise<Message>` — wait for
+  delivery to finish. Throws `SendFailedError` if it permanently failed, `SendTimeoutError`
+  if it is still queued at the deadline.
 - `.markRead(messageId) => Promise<...>` — mark a message read so later polls can skip it.
 - `.burn() => Promise<...>` — delete every message but keep the address.
 - `.downloadAttachment(messageId, attachmentId) => Promise<Uint8Array>` — fetch attachment bytes.
@@ -68,13 +74,44 @@ Use `baseUrl` for self-hosted / BYOD deployments (default `https://mailflat.net`
 > sent from this address, `"all"` for both. Without this, `send()` followed by
 > `waitForMessage()` matches your own outgoing message — which breaks agent-to-agent flows.
 
+### Attachments, cc and bcc
+
+```ts
+await inbox.send("customer@example.com", {
+  subject: "Your invoice",
+  body: "Attached.",
+  cc: ["billing@example.com"],
+  bcc: ["audit@example.com"],
+  attachments: [{ filename: "invoice.pdf", content: bytes, contentType: "application/pdf" }],
+});
+```
+
+Give an attachment `content` (a `Uint8Array`) or `contentBase64` — the encoding happens in
+the SDK. ⚠️ Unlike the Python SDK there is no file *path* option: this package also runs in
+a browser, where there is no filesystem. Read the file yourself and pass the bytes.
+
+Size and count limits depend on your plan; going over throws with the limit spelled out
+rather than silently dropping the file. `bcc` recipients receive the mail but never appear
+in its headers — not even in their own copy. `reply()` accepts all three too.
+
+### Did it actually go out?
+
+`send()` resolves as soon as the mail is **accepted**; delivery runs on a queue:
+
+```ts
+const res = await inbox.send("customer@example.com", { subject: "Your invoice" });
+await inbox.waitUntilSent(res.message_id, { timeout: 120_000 });   // throws if it failed
+```
+
+For anything long-running, subscribe to the `message.delivered` / `message.failed`
+webhooks instead of polling.
+
 ### `Message`
 `.otp`, `.subject`, `.sender`, `.text`, `.html`, `.toAddress`, `.direction`, `.receivedAt`,
 `.links`, `.attachments`, `.spam`, `.headers`, `.isRead`, `.raw`.
 
 - `.links` — URLs found in the body (HTML hrefs first). For "click the verification link" flows.
 - `.attachments` — metadata; `msg.attachments[0].download()` fetches the bytes.
-  ⚠️ `send()` cannot attach files yet, so you cannot produce an attachment from the SDK alone.
 - `.spam` — `{score, required, is_spam, rules, scanner}`, or `null` when never scanned.
   ⚠️ Spam scanning is currently **disabled** on mailflat.net, so today this is `null` for
   every message.

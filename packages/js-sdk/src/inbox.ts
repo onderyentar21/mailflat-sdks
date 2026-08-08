@@ -8,12 +8,19 @@
 //
 // Key export: Inbox
 
-import { EncryptedInboxError, MailFlatError, OTPTimeoutError } from "./errors";
+import {
+  EncryptedInboxError,
+  MailFlatError,
+  OTPTimeoutError,
+  SendFailedError,
+  SendTimeoutError,
+} from "./errors";
 import type { MailFlat } from "./client";
 import {
   DIRECTIONS,
   type Direction,
   type Message,
+  type OutgoingAttachment,
   type ReadOptions,
   type ReplyOptions,
   type SendOptions,
@@ -23,6 +30,45 @@ import {
 } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Bytes → standard base64, without Node's Buffer.
+ *
+ * Hand-rolled because this package must work in a browser too, where `Buffer` does not
+ * exist; and `btoa(String.fromCharCode(...bytes))` blows the argument limit (and the
+ * stack) on a file of any real size. Chunked so a 10 MB attachment encodes fine.
+ */
+function toBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** One attachment → the wire shape the API expects. */
+function encodeAttachment(att: OutgoingAttachment): Record<string, string> {
+  const filename = (att.filename ?? "").trim();
+  if (!filename) throw new MailFlatError("Each attachment needs a filename.");
+
+  let contentBase64 = att.contentBase64;
+  if (contentBase64 == null) {
+    const raw = att.content;
+    if (raw == null) {
+      throw new MailFlatError(
+        `Attachment "${filename}" needs content (bytes) or contentBase64 (a base64 string).`,
+      );
+    }
+    contentBase64 = toBase64(raw instanceof Uint8Array ? raw : new Uint8Array(raw));
+  }
+  return {
+    filename,
+    content_type: att.contentType ?? "application/octet-stream",
+    content_b64: contentBase64,
+  };
+}
 
 function checkDirection(direction: Direction): Direction {
   if (!DIRECTIONS.includes(direction)) {
@@ -70,6 +116,12 @@ export class Inbox {
         body,
         html: opts.html,
         inReplyTo: m.messageId,
+        // Everything send() accepts, reply() accepts too (K6): answering a mail with a
+        // file attached is normal, and dropping back to send() to do it would lose the
+        // threading headers that make it look like a reply.
+        cc: opts.cc,
+        bcc: opts.bcc,
+        attachments: opts.attachments,
       });
     };
     for (const att of m.attachments) {
@@ -194,6 +246,18 @@ export class Inbox {
   /**
    * Send mail from this inbox's address (DKIM-signed, through MailFlat's own MTA).
    *
+   * Resolves as soon as the mail is ACCEPTED for delivery — not once it is delivered.
+   * Delivery runs on a queue, so the response carries `message_id` and `queued: true`;
+   * use `waitUntilSent(messageId)` (or a `message.delivered` webhook) to learn how it
+   * ended. Blocking here would put back the exact stall the queue removed.
+   *
+   * `attachments` takes bytes or base64 — the encoding happens here:
+   *
+   *     inbox.send(to, { attachments: [{ filename: "a.pdf", content: bytes }] });
+   *
+   * `bcc` recipients receive the mail but never appear in its headers — not even in their
+   * own copy.
+   *
    * Pass `inReplyTo` (a Message-ID) to keep the mail in an existing conversation; without it
    * the recipient's client starts a new thread. `message.reply()` fills this in for you.
    *
@@ -207,7 +271,67 @@ export class Inbox {
     };
     if (opts.html != null) payload.html = opts.html;
     if (opts.inReplyTo != null) payload.in_reply_to = opts.inReplyTo;
+    if (opts.cc?.length) payload.cc = opts.cc;
+    if (opts.bcc?.length) payload.bcc = opts.bcc;
+    if (opts.attachments?.length) payload.attachments = opts.attachments.map(encodeAttachment);
     return this.client._post(`/api/v1/inboxes/${this.address}/send`, payload);
+  }
+
+  /**
+   * Fetch one message by id — the way to ask "what happened to this send?".
+   *
+   * Without it the only way to check a sent mail's status was to pull the whole outbound
+   * list and find the id by hand, which for an agent that sent 100 mails meant 100
+   * messages per check.
+   */
+  async message(messageId: number): Promise<Message> {
+    const res = await this.client._get(
+      `/api/v1/inboxes/${this.address}/messages/${messageId}`,
+    );
+    return this._wrap(res.email ?? {});
+  }
+
+  /**
+   * Wait until a sent mail reaches a final delivery state.
+   *
+   * `send()` is asynchronous, so "did it actually go out?" has no synchronous answer. This
+   * polls the message until the server reports one — the pull half of the contract (the
+   * push half is the `message.delivered` / `message.failed` webhook; prefer that when you
+   * can receive one).
+   *
+   * Resolves with the message on success. Throws `SendFailedError` when delivery
+   * permanently failed and `SendTimeoutError` when it is still queued at the deadline. It
+   * does NOT resolve quietly on failure: a helper called `waitUntilSent` that hands back a
+   * failed mail as if nothing happened is how mail goes missing.
+   */
+  async waitUntilSent(
+    messageId: number,
+    opts: { timeout?: number; pollInterval?: number } = {},
+  ): Promise<Message> {
+    const timeout = opts.timeout ?? 120_000;
+    const pollInterval = opts.pollInterval ?? 2_000;
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      const message = await this.message(messageId);
+      const status = message.sendStatus;
+      if (status === "sent" || status === "unsigned") return message;
+      if (status === "failed") {
+        throw new SendFailedError(
+          message.sendError || "Delivery failed",
+          messageId,
+          status,
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new SendTimeoutError(
+          `Message ${messageId} was still ${status ?? "queued"} after ${timeout}ms. ` +
+            "It may still be delivered; the queue keeps retrying.",
+          messageId,
+          status,
+        );
+      }
+      await sleep(Math.min(pollInterval, Math.max(0, deadline - Date.now())));
+    }
   }
 
   /** Mark one message as read, so the next poll can skip it. */

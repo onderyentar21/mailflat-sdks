@@ -7,6 +7,11 @@
 //   - depends on: @mailflat/sdk (MailFlat client + redactSecrets), zod (schemas)
 //   - used by:    index.ts, user code (generateText({ tools: { ...mailflatToolSuite(...) } }))
 //
+// ⚠️ sendEmail / reply take cc and bcc but NOT attachments. An address is a short string;
+// file bytes would have to travel through the model's context, which costs tokens and is
+// simply impossible for a multi-megabyte file. Attach files from the SDK
+// (inbox.send(to, { attachments: [...] })) — the code surface, not the model surface.
+//
 // Key export: mailflatToolSuite(options) → dictionary of tool objects
 
 import { EncryptedInboxError, MailFlat, MailFlatError, OTPTimeoutError, redactSecrets } from "@mailflat/sdk";
@@ -176,16 +181,18 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
     ),
 
     sendEmail: defineTool(
-      "Send an email FROM the given inbox address (DKIM-signed via MailFlat's mail servers). Use for replies or outbound automation.",
+      "Send an email FROM the given inbox address (DKIM-signed via MailFlat's mail servers). Use for replies or outbound automation. Returns once the mail is ACCEPTED for delivery, not once it is delivered.",
       z.object({
         address: z.string().describe("The inbox address to send from (must belong to this API key)."),
         to: z.string().describe("Recipient email address."),
         subject: z.string().optional().describe("Email subject line."),
         body: z.string().optional().describe("Plain-text body."),
         html: z.string().optional().describe("Optional HTML body."),
+        cc: z.array(z.string()).optional().describe("Addresses to copy. They appear in the mail's headers."),
+        bcc: z.array(z.string()).optional().describe("Addresses to copy privately. They never appear in the headers."),
       }),
-      ({ address, to, subject, body, html }) =>
-        guarded(() => client.inbox(address).send(to, { subject, body, html })),
+      ({ address, to, subject, body, html, cc, bcc }) =>
+        guarded(() => client.inbox(address).send(to, { subject, body, html, cc, bcc })),
     ),
 
     reply: defineTool(
@@ -195,14 +202,16 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
         messageId: z.number().describe("The id of the message to answer."),
         body: z.string().optional().describe("Plain-text reply body."),
         html: z.string().optional().describe("Optional HTML body."),
+        cc: z.array(z.string()).optional().describe("Addresses to copy. They appear in the mail's headers."),
+        bcc: z.array(z.string()).optional().describe("Addresses to copy privately. They never appear in the headers."),
       }),
-      ({ address, messageId, body, html }) =>
+      ({ address, messageId, body, html, cc, bcc }) =>
         guarded(async () => {
           const inbox = client.inbox(address);
           const messages = await inbox.messages({ direction: "all" });
           const target = messages.find((m) => m.id === messageId);
           if (!target) return { error: `Message ${messageId} not found in ${address}` };
-          return target.reply!(body ?? "", { html });
+          return target.reply!(body ?? "", { html, cc, bcc });
         }),
     ),
 

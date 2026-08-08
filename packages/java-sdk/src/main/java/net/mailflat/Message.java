@@ -4,8 +4,9 @@
 //   - used by:    Inbox (messages/latest/waitForMessage), user code
 //   - depends on: Inbox (reply/markRead/delete/download), Attachment, Jackson JsonNode
 //
-// Key export: Message — getters (otp(), subject(), links(), attachments(), headers(), ...)
-//             + header(name) + messageId() + replyToAddress() + reply() + markRead()
+// Key export: Message — getters (otp(), subject(), links(), attachments(), headers(),
+//             sendStatus(), ...) + header(name) + messageId() + replyToAddress()
+//             + reply(SendOptions) + markRead()
 package net.mailflat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -231,12 +232,25 @@ public final class Message {
      * {@code References} headers Gmail and Outlook use to thread. Without those a reply
      * shows up as a separate conversation, which is what a hand-rolled send produces.
      */
-    public JsonNode reply(String body) {
+    public SendResult reply(String body) {
         return reply(body, null, null);
     }
 
     /** Reply with an explicit HTML part and/or subject (null = derive it). */
-    public JsonNode reply(String body, String html, String subject) {
+    public SendResult reply(String body, String html, String subject) {
+        return reply(SendOptions.builder().body(body).html(html).subject(subject).build());
+    }
+
+    /**
+     * Reply carrying everything a send can carry — cc, bcc, attachments included.
+     *
+     * <p>Answering a mail with a file attached is the normal case, and an agent should not
+     * have to drop back to {@code inbox.send()} (losing the threading headers) just to attach
+     * one. The recipient and {@code In-Reply-To} are this method's own: whatever
+     * {@link SendOptions.Builder#inReplyTo(String)} holds is ignored here. A subject in the
+     * options wins over the derived {@code Re:} one.
+     */
+    public SendResult reply(SendOptions options) {
         if (inbox == null) {
             throw new MailFlatException(
                     "This message is not attached to an inbox. Use inbox.send(...) instead.");
@@ -245,8 +259,9 @@ public final class Message {
         if (target == null || target.isEmpty()) {
             throw new MailFlatException("This message has no sender to reply to.");
         }
-        return inbox.send(target, subject != null ? subject : replySubject(subject()),
-                body, html, messageId());
+        SendOptions opts = options != null ? options : SendOptions.builder().build();
+        String subject = opts.subject() != null ? opts.subject() : replySubject(subject());
+        return inbox.sendReply(target, opts, subject, messageId());
     }
 
     /** {@code Re:} prefix without doubling it up; clients also thread on the subject. */

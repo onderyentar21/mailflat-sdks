@@ -16,7 +16,7 @@ built-in `java.net.http` (no HTTP dependency); JSON via Jackson.
 <dependency>
   <groupId>com.github.onderyentar21</groupId>
   <artifactId>mailflat-sdks</artifactId>
-  <version>v0.3.0</version>
+  <version>v0.4.0</version>
 </dependency>
 ```
 
@@ -24,7 +24,7 @@ Gradle:
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.3.0' }
+dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.4.0' }
 ```
 
 ## Quickstart
@@ -89,9 +89,48 @@ your own outgoing mail:
 `messages([Direction])` → `List<Message>`, `latest([Direction])` → `Optional<Message>`,
 `waitForMessage(seconds[, Direction])`, `waitForOtp(seconds)` → `String`.
 
-**Write** — `send(to, subject, body[, html[, inReplyTo]])`, `markRead(messageId)`, `burn()`
-(delete every message, keep the address), `deleteMessage(messageId)`,
-`downloadAttachment(messageId, attachmentId)` → `byte[]`.
+**Write** — `send(to, subject, body[, html[, inReplyTo]])` and `send(to, SendOptions)`,
+`markRead(messageId)`, `burn()` (delete every message, keep the address),
+`deleteMessage(messageId)`, `downloadAttachment(messageId, attachmentId)` → `byte[]`.
+
+**Added in 0.4.0** — `message(id)` → `Message` (one message by id, without pulling the whole
+list), `send(to, SendOptions)` with attachments and cc/bcc, and `waitUntilSent(...)`.
+
+### Attachments, cc and bcc
+
+```java
+SendResult r = inbox.send("finance@acme.com", SendOptions.builder()
+        .subject("Invoice 2026-08")
+        .body("Attached, as discussed.")
+        .cc("accounts@acme.com")
+        .bcc("archive@acme.com")            // in no header, not even in its own copy
+        .attach(Path.of("/tmp/invoice.pdf")) // read + base64 encoded for you
+        .attach("notes.txt", bytes)          // or bytes you already hold
+        .build());
+```
+
+Attachment size and count depend on your plan (free is deliberately small); going over is
+rejected with the limit spelled out rather than silently dropping the file.
+
+### "Did it actually go out?"
+
+`send()` returns when the mail is **accepted for delivery** (HTTP 202), not when it is
+delivered — delivery runs on a queue. `SendResult` carries `messageId()` and `queued()`; ask
+for the outcome:
+
+```java
+Message sent = inbox.waitUntilSent(r);        // or waitUntilSent(messageId, seconds)
+```
+
+- delivered → returns the `Message` (`sendStatus()` is `sent`, or `unsigned` when it went out
+  without a DKIM signature)
+- permanently failed → `SendFailedException`, carrying the server's reason
+- still queued when your timeout elapses → `SendTimeoutException`. **That is not a failure**:
+  the queue keeps retrying, so treating it as "it never went out" and sending again delivers
+  the mail twice.
+
+Prefer the `message.delivered` / `message.failed` webhook when you can receive one;
+`waitUntilSent` is the pull half of the same contract, for places that cannot (local CI).
 
 ### `Message`
 `otp()`, `subject()`, `sender()`, `text()`, `html()`, `toAddress()`, `direction()`,
@@ -102,6 +141,10 @@ links quoted from an earlier one are excluded), `attachments()` → `List<Attach
 `headers()` → `Map<String,String>` (null on an encrypted inbox), `spam()`,
 `header(name)` (case-insensitive), `messageId()`, `replyToAddress()`,
 `reply(body[, html, subject])`, `markRead()`, `delete()`.
+
+**Added in 0.4.0:** `sendStatus()` / `sendError()` (delivery state of a mail you sent) and
+`reply(SendOptions)` — a reply carries everything a send does, attachments included, while
+keeping its own recipient and threading headers.
 
 > ⚠️ `sender()` is the SMTP **envelope** sender. For transactional mail that is usually a
 > bounce address, so `send(to = msg.sender(), …)` quietly delivers your reply to a machine.
@@ -125,7 +168,9 @@ the caller never finds out; a retried create opens a second inbox and burns quot
 All extend `MailFlatException`: `AuthenticationException` (401), `PermissionException` (403),
 `NotFoundException` (404), `RateLimitException` (429), `ApiException` (other),
 `OtpTimeoutException` (no OTP before the timeout), `EncryptedInboxException` (the inbox is
-end-to-end encrypted, so the server cannot read it — use a non-encrypted inbox for automation).
+end-to-end encrypted, so the server cannot read it — use a non-encrypted inbox for automation),
+`SendFailedException` / `SendTimeoutException` (both `SendException`, carrying `messageId()`
+and `sendStatus()` — see `waitUntilSent` above for why they are two types and not one).
 
 ## License
 

@@ -7,10 +7,11 @@ Connected to:
   - imported by:  user code, mailflat-mcp, mailflat.langchain
 
 Key exports:
-  - `MailFlat` — client
+  - `MailFlat` — client · `mailflat.aio.AsyncMailFlat` — the same API over asyncio
   - `Inbox`, `Message`, `Attachment` — domain types
   - errors: `MailFlatError`, `AuthenticationError`, `MailFlatPermissionError`,
-    `NotFoundError`, `RateLimitError`, `APIError`, `OTPTimeoutError`, `EncryptedInboxError`
+    `NotFoundError`, `RateLimitError`, `APIError`, `OTPTimeoutError`,
+    `SendFailedError`, `SendTimeoutError`, `EncryptedInboxError`
   - `redact_secrets()` — strips secret fields from agent tool output (used by MCP/LangChain)
 """
 from __future__ import annotations
@@ -26,13 +27,16 @@ from .errors import (
     OTPTimeoutError,
     PermissionError,
     RateLimitError,
+    SendError,
+    SendFailedError,
+    SendTimeoutError,
 )
 from .inbox import Attachment, Inbox, Message
 from .redact import redact_secrets
 
 # The package's ONLY version source — pyproject.toml reads it via [tool.hatch.version].
 # Releasing = bump this line and nothing else.
-__version__ = "0.6.1"
+__version__ = "0.8.0"
 
 __all__ = [
     "MailFlat",
@@ -47,6 +51,9 @@ __all__ = [
     "RateLimitError",
     "APIError",
     "OTPTimeoutError",
+    "SendError",
+    "SendFailedError",
+    "SendTimeoutError",
     "EncryptedInboxError",
     "redact_secrets",
     "__version__",

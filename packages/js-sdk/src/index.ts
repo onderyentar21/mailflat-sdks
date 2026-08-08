@@ -6,7 +6,7 @@
 //   - depends on: client.ts, inbox.ts, errors.ts, types.ts, version.ts
 //   - used by:    user code, @mailflat/ai-sdk
 //
-// Key export: MailFlat (+ Inbox, tipler, hatalar, redactSecrets)
+// Key export: MailFlat (+ Inbox, types, errors, redactSecrets)
 
 export { MailFlat } from "./client";
 export type { MailFlatOptions } from "./client";
@@ -23,6 +23,7 @@ export type {
   ReplyOptions,
   WaitOptions,
   SendOptions,
+  OutgoingAttachment,
 } from "./types";
 export {
   MailFlatError,
@@ -32,6 +33,9 @@ export {
   RateLimitError,
   APIError,
   OTPTimeoutError,
+  SendError,
+  SendFailedError,
+  SendTimeoutError,
   EncryptedInboxError,
 } from "./errors";
 

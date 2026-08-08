@@ -24,8 +24,8 @@ Key exports (MCP tools):
   - read_messages(address, direction="in")
   - wait_for_otp(address, timeout=30)
   - wait_for_message(address, timeout=30)
-  - send_email(address, to, subject?, body?, html?)
-  - reply(address, message_id, body?, html?)
+  - send_email(address, to, subject?, body?, html?, cc?, bcc?)
+  - reply(address, message_id, body?, html?, cc?, bcc?)
   - mark_read(address, message_id)
   - burn_inbox(address)
   - delete_inbox(address)
@@ -137,17 +137,27 @@ def wait_for_message(address: str, timeout: int = 30) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def send_email(address: str, to: str, subject: str = "", body: str = "", html: str = "") -> dict:
+def send_email(address: str, to: str, subject: str = "", body: str = "", html: str = "",
+               cc: list[str] | None = None, bcc: list[str] | None = None) -> dict:
     """Send an email FROM the given inbox address (DKIM-signed via MailFlat's MTA).
-    Use for replies or outbound automation. `html` is optional."""
+    Use for replies or outbound automation. `html` is optional.
+
+    Returns once the mail is ACCEPTED for delivery, not once it is delivered: delivery
+    runs on a queue and the result arrives via webhook or by reading the message back.
+
+    `cc` addresses appear in the mail's headers; `bcc` addresses never do — not even in
+    their own copy. Attachments are not available here; send those from the SDK."""
     try:
         with _client() as c:
-            return redact_secrets(c.inbox(address).send(to, subject=subject, body=body, html=html or None))
+            return redact_secrets(c.inbox(address).send(
+                to, subject=subject, body=body, html=html or None,
+                cc=cc or None, bcc=bcc or None))
     except MailFlatError as e:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def reply(address: str, message_id: int, body: str = "", html: str = "") -> dict:
+def reply(address: str, message_id: int, body: str = "", html: str = "",
+          cc: list[str] | None = None, bcc: list[str] | None = None) -> dict:
     """Reply to a message so it stays in the SAME conversation.
 
     Prefer this over send_email when answering: it fills in the recipient, an `Re:` subject
@@ -159,7 +169,8 @@ def reply(address: str, message_id: int, body: str = "", html: str = "") -> dict
             target = next((m for m in inbox.messages(direction="all") if m.id == message_id), None)
             if target is None:
                 raise ToolError(f"Message {message_id} not found in {address}")
-            return redact_secrets(target.reply(body, html=html or None))
+            return redact_secrets(target.reply(body, html=html or None,
+                                               cc=cc or None, bcc=bcc or None))
     except MailFlatError as e:
         raise ToolError(str(e)) from e
 

@@ -126,6 +126,46 @@ describe("sendEmail", () => {
     const res = await suite.sendEmail.execute({ address: ADDR, to: "x@y.com", subject: "Hi", body: "Yo" });
     expect(res.status).toBe("sent");
   });
+
+  it("passes cc and bcc through under the wire names", async () => {
+    let body: any;
+    const { suite } = makeSuite((_url, init) => {
+      body = JSON.parse(init.body as string);
+      return jsonResponse(202, { ok: true, queued: true, message_id: 3 });
+    });
+    await suite.sendEmail.execute({
+      address: ADDR,
+      to: "x@y.com",
+      cc: ["w@y.com"],
+      bcc: ["s@y.com"],
+    });
+    expect(body.cc).toEqual(["w@y.com"]);
+    expect(body.bcc).toEqual(["s@y.com"]);
+  });
+
+  it("treats 202 Accepted as success", async () => {
+    // The endpoint answers "accepted for delivery", not "delivered". A suite that
+    // surfaced 202 as an error would break every send the model makes.
+    const { suite } = makeSuite(() => jsonResponse(202, { ok: true, queued: true }));
+    await expect(
+      suite.sendEmail.execute({ address: ADDR, to: "x@y.com" }),
+    ).resolves.toMatchObject({ queued: true });
+  });
+});
+
+describe("model surface", () => {
+  it("exposes cc/bcc but never attachments", () => {
+    // 🔒 K7: file bytes must not cross the MODEL surface. An address is a short string a
+    // model can reasonably choose; an attachment is bytes that would travel through the
+    // model's context — costly, and plainly impossible for a multi-megabyte file. Files
+    // are attached from the SDK (inbox.send(to, { attachments })), which is code.
+    const { suite } = makeSuite(() => jsonResponse(200, {}));
+    for (const name of ["sendEmail", "reply"] as const) {
+      const shape = (suite[name].parameters as any).shape;
+      expect(Object.keys(shape)).not.toContain("attachments");
+      expect(Object.keys(shape)).toEqual(expect.arrayContaining(["cc", "bcc"]));
+    }
+  });
 });
 
 describe("deleteInbox", () => {
