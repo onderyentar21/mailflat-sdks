@@ -177,6 +177,11 @@ still exported as `PermissionError` for compatibility — the new name no longer
 (no OTP before timeout), `EncryptedInboxError` (the inbox is end-to-end encrypted, so the
 server cannot read its contents — use a non-encrypted inbox for agent automation).
 
+A message or attachment id that is not in an inbox you own raises `NotFoundError`. An inbox you
+do not own always raises `MailFlatPermissionError`, whether or not it exists — the API will not
+confirm other people's addresses. So the two exceptions answer different questions: "wrong id"
+versus "wrong key".
+
 ## License
 
 MIT

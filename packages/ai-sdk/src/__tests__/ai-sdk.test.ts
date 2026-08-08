@@ -25,7 +25,7 @@ function makeSuite(handler: (url: string, init: RequestInit) => Response) {
 }
 
 describe("suite shape", () => {
-  it("exposes the 11 expected tools with matching parameters/inputSchema", () => {
+  it("exposes the 12 expected tools with matching parameters/inputSchema", () => {
     const { suite } = makeSuite(() => jsonResponse(200, {}));
     expect(Object.keys(suite).sort()).toEqual(
       [
@@ -36,6 +36,7 @@ describe("suite shape", () => {
         "waitForMessage",
         "sendEmail",
         "reply",
+        "waitUntilSent",
         "markRead",
         "burnInbox",
         "deleteInbox",
@@ -190,6 +191,73 @@ describe("error guard", () => {
 
 // The tools the leak test actually calls — the coverage check derives from HERE, not from a
 // hand-written list. A new tool that is not added here turns the coverage test red.
+// ================================================== waitUntilSent
+// sendEmail answers "accepted", not "delivered". These cover the three ways the follow-up
+// question can end; the timeout one is why the tool exists at all.
+describe("waitUntilSent", () => {
+  // A backend whose single message reports the given send_status.
+  function statusSuite(status: string, sendError: string | null = null) {
+    return makeSuite((url) => {
+      expect(url).toBe(`https://mailflat.net/api/v1/inboxes/${ADDR}/messages/5`);
+      return jsonResponse(200, {
+        ok: true,
+        email: { id: 5, direction: "out", send_status: status, send_error: sendError, subject: "hi" },
+      });
+    });
+  }
+
+  it("reports delivery once the mail went out", async () => {
+    const { suite } = statusSuite("sent");
+    const res: any = await suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 5000 });
+    expect(res.delivered).toBe(true);
+    expect(res.status).toBe("sent");
+    expect(res.timedOut).toBe(false);
+    expect(res.message.id).toBe(5);
+  });
+
+  it("counts `unsigned` as delivered — it went out, just without a DKIM signature", async () => {
+    const { suite } = statusSuite("unsigned");
+    const res: any = await suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 5000 });
+    expect(res.delivered).toBe(true);
+    expect(res.status).toBe("unsigned");
+  });
+
+  it("reports permanent failure with the reason", async () => {
+    const { suite } = statusSuite("failed", "550 unknown mailbox");
+    const res: any = await suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 5000 });
+    expect(res.delivered).toBe(false);
+    expect(res.timedOut).toBe(false);
+    expect(res.status).toBe("failed");
+    expect(res.error).toContain("550 unknown mailbox");
+  });
+
+  it("🔒 a timeout must not read as failure", async () => {
+    // A queued mail is not a lost mail. If this answer says "failed", or drops the
+    // instruction not to resend, the model's reasonable next move is to send again and the
+    // recipient gets the mail twice. Duplicate delivery — not silent loss — is the failure
+    // mode this tool defends against.
+    const { suite } = statusSuite("queued");
+    const res: any = await suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 1 });
+    expect(res.timedOut).toBe(true);
+    expect(res.delivered).toBe(false);
+    expect(res.status).toBe("queued");
+    expect(JSON.stringify(res).toLowerCase()).not.toContain("fail");
+    expect(res.note.toLowerCase()).toContain("do not send it again");
+  });
+
+  it("🔒 answers the same way the Python surfaces do", async () => {
+    // The note is written out twice — once here, once in agent_results.py — because one is
+    // TypeScript and the other Python. Two wordings would be two products, so the sentence
+    // itself is compared against the Python constant by frontend/lib/docs-ai.test.mjs; here
+    // we lock the KEYS, which is the half a text comparison cannot see.
+    const { suite } = statusSuite("queued");
+    const res: any = await suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 1 });
+    expect(Object.keys(res).sort()).toEqual(
+      ["status", "delivered", "timedOut", "message", "note"].sort(),
+    );
+  });
+});
+
 function leakRuns(suite: Record<string, any>): Array<[string, Promise<any>]> {
   return [
     ["createInbox", suite.createInbox.execute({ label: "leak" })],
@@ -199,6 +267,7 @@ function leakRuns(suite: Record<string, any>): Array<[string, Promise<any>]> {
     ["waitForMessage", suite.waitForMessage.execute({ address: ADDR, timeout: 1 })],
     ["sendEmail", suite.sendEmail.execute({ address: ADDR, to: "x@example.com", subject: "s", body: "b" })],
     ["reply", suite.reply.execute({ address: ADDR, messageId: 1, body: "ok" })],
+    ["waitUntilSent", suite.waitUntilSent.execute({ address: ADDR, messageId: 1, timeout: 1 })],
     ["markRead", suite.markRead.execute({ address: ADDR, messageId: 1 })],
     ["burnInbox", suite.burnInbox.execute({ address: ADDR })],
     ["deleteMessage", suite.deleteMessage.execute({ address: ADDR, messageId: 1 })],

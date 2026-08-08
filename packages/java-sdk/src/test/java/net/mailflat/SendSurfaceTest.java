@@ -142,6 +142,38 @@ class SendSurfaceTest {
                 body().get("attachments").get(0).get("content_type").asText());
     }
 
+    /**
+     * A file on disk must get the same type on every machine. This one is the regression:
+     * .bin used to fall through to Files.probeContentType(), which answers
+     * application/macbinary on macOS and something else on a Linux CI runner — so a test
+     * written against the type passed locally and failed in CI.
+     */
+    @Test
+    void aFileOnDiskGetsTheSameTypeOnEveryPlatform(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("payload.bin");
+        Files.write(file, new byte[]{0, 1, 2, 3});
+        acceptSend(1);
+
+        inbox().send("a@b.com", SendOptions.builder().attach(file).build());
+
+        assertEquals("application/octet-stream",
+                body().get("attachments").get(0).get("content_type").asText());
+    }
+
+    /**
+     * The disk path and the bytes path must agree: nothing about the file itself — only its
+     * name — may influence the type, or the two overloads drift apart per platform.
+     */
+    @Test
+    void pathAndBytesOverloadsGuessIdentically(@TempDir Path dir) throws Exception {
+        for (String name : new String[]{"a.pdf", "b.csv", "c.bin", "d.zzz", "noextension"}) {
+            Path file = dir.resolve(name);
+            Files.write(file, new byte[]{9});
+            assertEquals(OutgoingAttachment.of(name, new byte[]{9}).contentType(),
+                    OutgoingAttachment.of(file).contentType(), name);
+        }
+    }
+
     @Test
     void explicitContentTypeWinsOverTheGuess() throws Exception {
         acceptSend(1);

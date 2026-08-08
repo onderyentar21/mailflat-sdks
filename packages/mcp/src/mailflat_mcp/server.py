@@ -1,4 +1,4 @@
-"""MailFlat MCP server — an 11-tool set for GPT/Claude/Cursor/LangChain.
+"""MailFlat MCP server — a 12-tool set for GPT/Claude/Cursor/LangChain.
 
 A thin MCP shell over the `mailflat` Python SDK; HTTP and behaviour live in the SDK.
 Auth: `MAILFLAT_API_KEY` env var (the `mf_live_...` key from your dashboard).
@@ -15,6 +15,11 @@ Connected to:
 tool call with `isError`, and a client that only sees a JSON body treats a returned error as a
 successful call. The message carries the detail the model needs to recover.
 
+⚠️ ONE documented exception to that rule: `wait_until_sent` RETURNS a dictionary when the
+mail is still queued. A timeout there is not a fault — the queue is still retrying — and
+raising would flag the call `isError`, which is exactly the signal that makes a model send
+the mail a second time. Permanent failure still raises.
+
 ⚠️ Tool output goes through `redact_secrets()`: the per-inbox `api_key` in a backend
 response must never reach the model's context (and from there prompt logs) — see B-055.
 
@@ -26,6 +31,7 @@ Key exports (MCP tools):
   - wait_for_message(address, timeout=30)
   - send_email(address, to, subject?, body?, html?, cc?, bcc?)
   - reply(address, message_id, body?, html?, cc?, bcc?)
+  - wait_until_sent(address, message_id, timeout=60)
   - mark_read(address, message_id)
   - burn_inbox(address)
   - delete_inbox(address)
@@ -36,7 +42,17 @@ import os
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from mailflat import EncryptedInboxError, MailFlat, MailFlatError, OTPTimeoutError, redact_secrets
+from mailflat import (
+    EncryptedInboxError,
+    MailFlat,
+    MailFlatError,
+    OTPTimeoutError,
+    SendFailedError,
+    SendTimeoutError,
+    queued_result,
+    redact_secrets,
+    sent_result,
+)
 
 from ._version import __version__
 
@@ -174,6 +190,32 @@ def reply(address: str, message_id: int, body: str = "", html: str = "",
     except MailFlatError as e:
         raise ToolError(str(e)) from e
 
+
+@mcp.tool()
+def wait_until_sent(address: str, message_id: int, timeout: int = 60) -> dict:
+    """Find out whether a mail you sent was actually delivered.
+
+    send_email only means "accepted for delivery"; the mail goes out later on a queue. Call
+    this with the message_id send_email returned to learn the outcome.
+
+    Returns `delivered: true` once it went out. If it is still queued when the timeout
+    elapses you get `timed_out: true` with `delivered: false` — that is NOT a failure and
+    you must NOT send the mail again; the queue is still retrying."""
+    try:
+        with _client() as c:
+            return sent_result(c.inbox(address).wait_until_sent(message_id, timeout=timeout))
+    except SendTimeoutError as e:
+        # Deliberately NOT raised. Every other tool here signals trouble with ToolError so
+        # the client marks the call `isError`, but "still queued" is a legitimate answer to
+        # "did it go?" — the answer being "not yet". Raising would tell the model the send
+        # went wrong, and the model's reasonable next move would be to send it again.
+        return queued_result(e)
+    except SendFailedError as e:
+        # This one DOES raise: delivery is over and it did not work. The reason travels in
+        # the message so the model can decide whether a corrected resend makes sense.
+        raise ToolError(str(e)) from e
+    except MailFlatError as e:
+        raise ToolError(str(e)) from e
 
 @mcp.tool()
 def mark_read(address: str, message_id: int) -> dict:

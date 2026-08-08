@@ -257,3 +257,63 @@ test("template ids are unique and the default points at a real template", () => 
   assert.ok(getTemplate(DEFAULT_TEMPLATE), "DEFAULT_TEMPLATE matches no template");
   assert.equal(getTemplate("jest"), null);
 });
+
+// ==================================================== dependency pin (drift)
+/**
+ * 🔒 The range the template pins must ADMIT the published SDK.
+ *
+ * Real case (8 Aug 2026, found by an outside agent using MailFlat): `templates.js` said
+ * `"@mailflat/sdk": "^0.3.2"` in two places. In npm, a caret on a 0.x version locks the
+ * MINOR, so `^0.3.2` resolves to 0.3.2 alone — 0.4.0 and 0.5.0 fall outside it. A user who
+ * ran `npm create mailflat` and then wrote the JS example from the docs hit
+ * `waitUntilSent is not a function`: cc, bcc, attachments, waitUntilSent, reply and
+ * inReplyTo are all absent from 0.3.2 and all present in 0.5.0.
+ *
+ * Why nobody noticed: the scaffold still generated, every file was in place, and the tests
+ * stayed green. Nothing looked at whether the generated package.json resolved to a version
+ * that actually carries the API the documentation promises. A file existing is not the same
+ * as a file working.
+ */
+test("🔒 the template's @mailflat/sdk pin admits the published SDK", () => {
+  const src = readFileSync(new URL("../templates.js", import.meta.url), "utf8");
+  const pins = [...src.matchAll(/"@mailflat\/sdk":\s*"\^(\d+)\.(\d+)\.(\d+)"/g)]
+    .map((m) => m.slice(1, 4).map(Number));
+  assert.ok(pins.length > 0, "no @mailflat/sdk pin found in templates.js — has the regex gone stale?");
+
+  const sdkVer = JSON.parse(sdk("js-sdk/package.json")).version;
+  const [sMaj, sMin, sPatch] = sdkVer.split(".").map(Number);
+
+  for (const [maj, min, patch] of pins) {
+    const pin = `^${maj}.${min}.${patch}`;
+    assert.equal(maj, sMaj, `${pin} has a different major than the published SDK ${sdkVer}`);
+    if (sMaj === 0) {
+      // On 0.x a caret locks the MINOR: ^0.3.2 means >=0.3.2 <0.4.0. If the minor differs,
+      // the published version is outside the range and the user gets an older API.
+      assert.equal(min, sMin,
+        `${pin} resolves to 0.${min}.x only, but the published SDK is ${sdkVer} — ` +
+        `the user would get ${sMin > min ? "an older" : "a nonexistent"} API. Pin ^${sdkVer}.`);
+    }
+    assert.ok(patch <= sPatch, `${pin} is ahead of the published SDK ${sdkVer}`);
+  }
+});
+
+/**
+ * 🔒 The generated JS must call methods the pinned SDK actually has.
+ *
+ * The test above compares versions; this one compares surfaces. Either can be wrong on its
+ * own: the right version can be pinned while a nonexistent method is called, or the reverse.
+ */
+test("🔒 every SDK method the template calls exists in the js-sdk source", () => {
+  const surface = sdk("js-sdk/src/inbox.ts") + sdk("js-sdk/src/client.ts");
+  const generated = TEMPLATE_IDS
+    .filter((id) => id !== "pytest")
+    .flatMap((id) => Object.values(render(getTemplate(id))))
+    .join("\n");
+
+  const called = new Set([...generated.matchAll(/\b(?:inbox|mf|box)\.(\w+)\(/g)].map((m) => m[1]));
+  assert.ok(called.size > 0, "no SDK calls found in the generated code — has the regex gone stale?");
+  for (const name of called) {
+    assert.match(surface, new RegExp(`\\b(async\\s+)?${name}\\s*\\(`),
+      `the template calls inbox.${name}() but the js-sdk source has no such method`);
+  }
+});

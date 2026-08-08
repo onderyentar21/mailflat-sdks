@@ -99,6 +99,13 @@ def test_descriptions_and_schemas_match_exactly():
             f"{name}: argument schema differs between the sync and async toolkits"
 
 
+def _status(status, error=None):
+    """A backend whose single message reports the given send_status."""
+    return lambda req: httpx.Response(200, json={"ok": True, "email": {
+        "id": 5, "direction": "out", "send_status": status, "send_error": error,
+        "subject": "hi", "is_encrypted": False}})
+
+
 @pytest.mark.parametrize("scenario", [
     # (handler, tool name, arguments) — the same fault must produce the same answer.
     (lambda req: httpx.Response(200, json={"email": None}), "wait_for_message",
@@ -109,6 +116,12 @@ def test_descriptions_and_schemas_match_exactly():
      "list_inboxes", {}),
     (lambda req: httpx.Response(200, json={"encrypted": True, "note": "E2E inbox"}),
      "wait_for_otp", {"address": ADDR, "timeout": 0}),
+    # All three outcomes of the delivery question. The timeout one matters most: it is the
+    # branch a model acts on, and two surfaces wording it differently is two products.
+    (_status("sent"), "wait_until_sent", {"address": ADDR, "message_id": 5, "timeout": 5}),
+    (_status("failed", "550 unknown mailbox"), "wait_until_sent",
+     {"address": ADDR, "message_id": 5, "timeout": 5}),
+    (_status("queued"), "wait_until_sent", {"address": ADDR, "message_id": 5, "timeout": 0}),
 ])
 def test_same_fault_gives_the_same_answer(scenario):
     """🔒 Behaviour parity, not just shape.
@@ -121,6 +134,20 @@ def test_same_fault_gives_the_same_answer(scenario):
     got_sync = sync_tools(handler)[name].invoke(args)
     got_async = asyncio.run(async_tools(handler)[name].ainvoke(args))
     assert got_sync == got_async, f"{name}: sync and async answered differently"
+
+
+def test_async_wait_until_sent_timeout_does_not_read_as_failure():
+    """🔒 The sync toolkit has this lock; without it here, only one surface is protected.
+
+    Parity above proves the two answers are EQUAL — equal and both wrong is still wrong, so
+    the content is asserted on the async surface in its own right.
+    """
+    out = asyncio.run(async_tools(_status("queued"))["wait_until_sent"].ainvoke(
+        {"address": ADDR, "message_id": 5, "timeout": 0}))
+    assert out["timed_out"] is True
+    assert out["delivered"] is False
+    assert "fail" not in json.dumps(out).lower()
+    assert "do not send it again" in out["note"].lower()
 
 
 def test_secrets_are_redacted_on_the_async_path_too():

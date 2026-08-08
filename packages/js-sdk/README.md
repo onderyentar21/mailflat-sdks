@@ -133,6 +133,10 @@ All errors extend `MailFlatError`: `AuthenticationError` (401), `PermissionError
 (no OTP before timeout), `EncryptedInboxError` (the inbox is end-to-end encrypted, so the
 server cannot read its contents — use a non-encrypted inbox for agent automation).
 
+A message or attachment id that is not in an inbox you own throws `NotFoundError`. An inbox you
+do not own always throws `PermissionError`, whether or not it exists — the API will not confirm
+other people's addresses. So the two answer different questions: "wrong id" versus "wrong key".
+
 ## License
 
 MIT

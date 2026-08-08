@@ -35,6 +35,9 @@ def _calls(addr: str) -> dict:
         "wait_for_message": lambda: server.wait_for_message(addr, timeout=0),
         "send_email": lambda: server.send_email(addr, to="x@example.com", subject="s", body="b"),
         "reply": lambda: server.reply(addr, 1, body="ok"),
+        # timeout=0 keeps it fast; the returned payload embeds no message, but the FAILURE
+        # path of this tool does carry server text, and that is scanned below too.
+        "wait_until_sent": lambda: server.wait_until_sent(addr, 1, timeout=0),
         "mark_read": lambda: server.mark_read(addr, 1),
         "burn_inbox": lambda: server.burn_inbox(addr),
         "delete_message": lambda: server.delete_message(addr, 1),

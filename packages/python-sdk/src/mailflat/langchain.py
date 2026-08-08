@@ -1,4 +1,4 @@
-"""MailFlat LangChain integration — `MailFlatToolkit` plus a 10-tool LangChain tool set.
+"""MailFlat LangChain integration — `MailFlatToolkit` plus a 12-tool LangChain tool set.
 
 A thin LangChain shell over the `mailflat` SDK; all HTTP and behaviour live in the client.
 `langchain-core` is an optional dependency → `pip install mailflat[langchain]`.
@@ -7,9 +7,8 @@ Usage:
     from mailflat.langchain import MailFlatToolkit
     toolkit = MailFlatToolkit(api_key=env("MAILFLAT_KEY"))
     tools = toolkit.get_tools()   # create_inbox, list_inboxes, read_messages, wait_for_otp,
-                                  # wait_for_message, send_email, reply, mark_read,
-                                  # burn_inbox,
-                                  # delete_inbox  (delete_message is deliberately absent)
+                                  # wait_for_message, send_email, reply, wait_until_sent,
+                                  # mark_read, burn_inbox, delete_inbox, delete_message
 
 ⚠️ Tool output goes through `redact_secrets()`: a per-inbox `api_key` must never reach the
 model's context (and from there LangSmith traces) — see B-055.
@@ -19,8 +18,13 @@ string; file bytes would have to travel through the model's context, which costs
 and is simply impossible for a multi-megabyte file. Attach files from the SDK
 (`inbox.send(..., attachments=[...])`) — the code surface, not the model surface.
 
+⚠️ `send_email` returns "accepted", not "delivered" — delivery happens on a queue. That is
+what `wait_until_sent` is for. Without it a model that gets no answer does the reasonable
+thing and sends again, so the missing tool produced DUPLICATE mail, not silent loss.
+
 Connected to:
-  - imports from: mailflat.client (MailFlat), mailflat.redact, langchain_core.tools
+  - imports from: mailflat.client (MailFlat), mailflat.redact, mailflat.agent_results,
+    langchain_core.tools
   - imported by:  user code (LangChain agents)
 
 Key exports:
@@ -39,8 +43,15 @@ except ImportError as exc:  # langchain-core is not installed → explain how to
         "Install it with:  pip install mailflat[langchain]"
     ) from exc
 
+from .agent_results import failed_result, queued_result, sent_result
 from .client import DEFAULT_BASE_URL, MailFlat
-from .errors import EncryptedInboxError, MailFlatError, OTPTimeoutError
+from .errors import (
+    EncryptedInboxError,
+    MailFlatError,
+    OTPTimeoutError,
+    SendFailedError,
+    SendTimeoutError,
+)
 from .redact import redact_secrets
 
 if TYPE_CHECKING:
@@ -203,6 +214,31 @@ class MailFlatToolkit:
             except (MailFlatError, ValueError) as e:
                 return {"error": str(e)}
 
+        def wait_until_sent(address: str, message_id: int, timeout: int = 60) -> dict:
+            """Find out whether a mail you sent was actually delivered.
+
+            send_email only means "accepted for delivery"; the mail is delivered later by a
+            queue. Call this with the message_id send_email returned to learn the outcome.
+
+            Returns `delivered: true` once it went out. If it is still queued when the
+            timeout elapses you get `timed_out: true` and `delivered: false` — that is NOT a
+            failure and you must NOT send the mail again; the queue is still retrying.
+
+            Args:
+                address: The inbox address the mail was sent from.
+                message_id: The id send_email returned for the mail.
+                timeout: Maximum seconds to wait for a final state (default 60).
+            """
+            try:
+                return sent_result(
+                    client.inbox(address).wait_until_sent(message_id, timeout=timeout))
+            except SendTimeoutError as e:
+                return queued_result(e)
+            except SendFailedError as e:
+                return failed_result(e)
+            except MailFlatError as e:
+                return {"error": str(e)}
+
         def mark_read(address: str, message_id: int) -> dict:
             """Mark one message as read so later polls can skip it.
 
@@ -240,6 +276,18 @@ class MailFlatToolkit:
             except MailFlatError as e:
                 return {"error": str(e)}
 
+        def delete_message(address: str, message_id: int) -> dict:
+            """Delete a single message in an inbox by its id (the inbox itself stays).
+
+            Args:
+                address: The inbox address that holds the message.
+                message_id: The message id, as returned by read_messages.
+            """
+            try:
+                return redact_secrets(client.inbox(address).delete_message(message_id))
+            except MailFlatError as e:
+                return {"error": str(e)}
+
         funcs: list[Any] = [
             create_inbox,
             list_inboxes,
@@ -248,9 +296,18 @@ class MailFlatToolkit:
             wait_for_message,
             send_email,
             reply,
+            wait_until_sent,
             mark_read,
             burn_inbox,
             delete_inbox,
+            # delete_message used to be withheld here on the grounds that "a model which can
+            # delete single messages can destroy evidence of what it did". That reasoning
+            # does not survive contact with the list above it: delete_inbox is already
+            # exposed and destroys EVERY message plus the address. Withholding the smaller
+            # capability while granting the larger one protected nothing, and it left this
+            # toolkit as the only model surface missing a tool that MCP and the Vercel AI
+            # SDK have shipped since day 42.
+            delete_message,
         ]
         # from_function derives args_schema from the type hints and docstring itself,
         # which side-steps the pydantic v1/v2 difference.
@@ -420,6 +477,31 @@ class AsyncMailFlatToolkit:
             except (MailFlatError, ValueError) as e:
                 return {"error": str(e)}
 
+        async def wait_until_sent(address: str, message_id: int, timeout: int = 60) -> dict:
+            """Find out whether a mail you sent was actually delivered.
+
+            send_email only means "accepted for delivery"; the mail is delivered later by a
+            queue. Call this with the message_id send_email returned to learn the outcome.
+
+            Returns `delivered: true` once it went out. If it is still queued when the
+            timeout elapses you get `timed_out: true` and `delivered: false` — that is NOT a
+            failure and you must NOT send the mail again; the queue is still retrying.
+
+            Args:
+                address: The inbox address the mail was sent from.
+                message_id: The id send_email returned for the mail.
+                timeout: Maximum seconds to wait for a final state (default 60).
+            """
+            try:
+                return sent_result(
+                    await client.inbox(address).wait_until_sent(message_id, timeout=timeout))
+            except SendTimeoutError as e:
+                return queued_result(e)
+            except SendFailedError as e:
+                return failed_result(e)
+            except MailFlatError as e:
+                return {"error": str(e)}
+
         async def mark_read(address: str, message_id: int) -> dict:
             """Mark one message as read so later polls can skip it.
 
@@ -457,9 +539,22 @@ class AsyncMailFlatToolkit:
             except MailFlatError as e:
                 return {"error": str(e)}
 
+        async def delete_message(address: str, message_id: int) -> dict:
+            """Delete a single message in an inbox by its id (the inbox itself stays).
+
+            Args:
+                address: The inbox address that holds the message.
+                message_id: The message id, as returned by read_messages.
+            """
+            try:
+                return redact_secrets(await client.inbox(address).delete_message(message_id))
+            except MailFlatError as e:
+                return {"error": str(e)}
+
         coroutines: list[Any] = [
             create_inbox, list_inboxes, read_messages, wait_for_otp, wait_for_message,
-            send_email, reply, mark_read, burn_inbox, delete_inbox,
+            send_email, reply, wait_until_sent, mark_read, burn_inbox, delete_inbox,
+            delete_message,
         ]
         # `func=` is what StructuredTool derives the ARGUMENT SCHEMA from, even when the
         # async path is the real implementation. The stub therefore has to carry the

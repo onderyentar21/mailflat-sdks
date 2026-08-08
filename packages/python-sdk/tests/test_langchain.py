@@ -55,13 +55,17 @@ def test_get_tools_returns_the_full_named_tool_set():
         "wait_for_message",
         "send_email",
         "reply",
+        "wait_until_sent",
         "mark_read",
         "burn_inbox",
         "delete_inbox",
+        "delete_message",
     }
-    # delete_message is deliberately absent: a model that can delete single messages can
-    # destroy evidence of what it did.
-    assert "delete_message" not in tools
+    # delete_message used to be withheld here, with the rationale that "a model which can
+    # delete single messages can destroy evidence of what it did". The list above refutes
+    # it: delete_inbox is granted, and it destroys every message AND the address. Denying
+    # the smaller capability while granting the larger one bought no safety and left this
+    # toolkit the only model surface without a tool MCP and the AI SDK have had since day 42.
     # Every tool must carry a description and a usable args schema (LangChain BaseTool).
     for tool in tools.values():
         assert tool.description
@@ -181,6 +185,74 @@ def test_delete_inbox():
     tools = _tools_by_name(make_toolkit(handler))
     out = tools["delete_inbox"].invoke({"address": ADDR})
     assert out["ok"] is True
+
+
+def test_delete_message_hits_the_single_message_endpoint():
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "DELETE"
+        assert req.url.path == f"/api/v1/inboxes/{ADDR}/messages/7"
+        return httpx.Response(200, json={"ok": True, "message": "Email deleted"})
+
+    tools = _tools_by_name(make_toolkit(handler))
+    out = tools["delete_message"].invoke({"address": ADDR, "message_id": 7})
+    assert out["message"] == "Email deleted"
+
+
+# -------------------------------------------------------------- wait_until_sent
+def _status_handler(status, error=None):
+    """A backend whose single message reports the given send_status."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == f"/api/v1/inboxes/{ADDR}/messages/5"
+        return httpx.Response(200, json={"ok": True, "email": {
+            "id": 5, "direction": "out", "send_status": status, "send_error": error,
+            "subject": "hi", "is_encrypted": False}})
+    return handler
+
+
+def test_wait_until_sent_reports_delivery():
+    tools = _tools_by_name(make_toolkit(_status_handler("sent")))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 5})
+    assert out["delivered"] is True
+    assert out["status"] == "sent"
+    assert out["timed_out"] is False
+    assert out["message"]["id"] == 5
+
+
+def test_wait_until_sent_treats_unsigned_as_delivered():
+    """`unsigned` means it went out without a DKIM signature — it still went out.
+
+    Reporting it as undelivered would push an agent to resend a mail the recipient has.
+    """
+    tools = _tools_by_name(make_toolkit(_status_handler("unsigned")))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 5})
+    assert out["delivered"] is True
+    assert out["status"] == "unsigned"
+
+
+def test_wait_until_sent_reports_permanent_failure_with_the_reason():
+    tools = _tools_by_name(make_toolkit(_status_handler("failed", "550 unknown mailbox")))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 5})
+    assert out["delivered"] is False
+    assert out["timed_out"] is False
+    assert out["status"] == "failed"
+    assert "550 unknown mailbox" in out["error"]
+
+
+def test_wait_until_sent_timeout_does_not_read_as_failure():
+    """🔒 The reason this tool exists.
+
+    A queued mail is not a lost mail. If this answer contains the word "failed", or omits
+    the instruction not to resend, the model's reasonable next move is to send again — and
+    the recipient gets the mail twice. Duplicate delivery, not silent loss, is the failure
+    mode this whole surface is defending against.
+    """
+    tools = _tools_by_name(make_toolkit(_status_handler("queued")))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 0})
+    assert out["timed_out"] is True
+    assert out["delivered"] is False
+    assert out["status"] == "queued"
+    assert "fail" not in json.dumps(out).lower()
+    assert "do not send it again" in out["note"].lower()
 
 
 # ----------------------------------------------------------------- err guard

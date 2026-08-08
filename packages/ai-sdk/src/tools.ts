@@ -1,5 +1,10 @@
-// MailFlat tool suite for the Vercel AI SDK — createInbox, listInboxes, readMessages,
-// waitForOtp, waitForMessage, sendEmail, markRead, burnInbox, deleteInbox, deleteMessage.
+// MailFlat tool suite for the Vercel AI SDK — 12 tools: createInbox, listInboxes,
+// readMessages, waitForOtp, waitForMessage, sendEmail, reply, waitUntilSent, markRead,
+// burnInbox, deleteInbox, deleteMessage.
+//
+// (This header used to list ten of them, silently dropping `reply`. A comment that
+// miscounts the file it sits on top of is how a stale number survives for months, so the
+// count is now compared with the real one by frontend/lib/docs-ai.test.mjs.)
 //
 // A thin layer over the @mailflat/sdk client; all HTTP and behaviour live there (DRY).
 //
@@ -12,10 +17,39 @@
 // simply impossible for a multi-megabyte file. Attach files from the SDK
 // (inbox.send(to, { attachments: [...] })) — the code surface, not the model surface.
 //
+// ⚠️ sendEmail returns "accepted", not "delivered" — delivery runs on a queue. waitUntilSent
+// is how the model asks what happened. Its timeout branch must never read as failure: a
+// model told "failed" when the mail is merely queued will send it again, and the recipient
+// gets it twice. The payload wording is shared with the Python surfaces (agent_results.py)
+// and locked by test.
+//
 // Key export: mailflatToolSuite(options) → dictionary of tool objects
 
-import { EncryptedInboxError, MailFlat, MailFlatError, OTPTimeoutError, redactSecrets } from "@mailflat/sdk";
+import {
+  EncryptedInboxError,
+  MailFlat,
+  MailFlatError,
+  OTPTimeoutError,
+  SendFailedError,
+  SendTimeoutError,
+  redactSecrets,
+} from "@mailflat/sdk";
 import { z } from "zod";
+
+/**
+ * Still queued when we stopped waiting. Must match SEND_QUEUED_NOTE in agent_results.py.
+ * Deliberately contains no form of the word "fail" — see the note on the Python constant.
+ */
+const SEND_QUEUED_NOTE =
+  "Still queued when the timeout elapsed. The queue keeps retrying with backoff, so this " +
+  "mail is still on its way. Do NOT send it again — a duplicate would reach the recipient " +
+  "twice. Ask again later, or subscribe to the message.delivered webhook.";
+
+/** The queue gave up. Must match SEND_FAILED_NOTE in agent_results.py. */
+const SEND_FAILED_NOTE =
+  "Delivery permanently failed and the queue will not retry. Read `error` for the " +
+  "reason (a rejection from the recipient's mail server, an unknown mailbox, and so on). " +
+  "Fix the cause before sending again.";
 
 export interface ToolSuiteOptions {
   /** MailFlat account API key (mf_live_...). Falls back to the MAILFLAT_API_KEY env var. */
@@ -213,6 +247,63 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
           if (!target) return { error: `Message ${messageId} not found in ${address}` };
           return target.reply!(body ?? "", { html, cc, bcc });
         }),
+    ),
+
+    waitUntilSent: defineTool(
+      "Find out whether a mail you sent was actually delivered. sendEmail only means 'accepted for delivery'; the mail goes out later on a queue. Pass the messageId sendEmail returned. Returns delivered:true once it went out. If it is still queued when the timeout elapses you get timedOut:true with delivered:false — that is NOT a failure and you must NOT send the mail again; the queue is still retrying.",
+      z.object({
+        address: z.string().describe("The inbox address the mail was sent from."),
+        messageId: z.number().describe("The id sendEmail returned for the mail."),
+        timeout: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Maximum milliseconds to wait for a final state (default 60000)."),
+      }),
+      async ({ address, messageId, timeout }) => {
+        try {
+          // `?? 60_000` on purpose: the SDK's own default is 120 s, which is a fine wait for
+          // a script but a long stall for an agent turn. Passing `timeout` straight through
+          // would have made the documented default a lie.
+          const msg = await client.inbox(address).waitUntilSent(messageId, {
+            timeout: timeout ?? 60_000,
+          });
+          // Handles its own error branches, so it does NOT pass through guarded() →
+          // redaction is applied by hand (same reason as waitForOtp/waitForMessage).
+          return redactSecrets({
+            status: msg.sendStatus,
+            delivered: true,
+            timedOut: false,
+            message: msg.raw,
+            note: "",
+          });
+        } catch (err) {
+          // Order matters: SendTimeoutError and SendFailedError both extend MailFlatError,
+          // so a leading `instanceof MailFlatError` branch would swallow both and answer
+          // every outcome with a bare {error} — the exact flattening this tool exists to
+          // prevent.
+          if (err instanceof SendTimeoutError)
+            return {
+              status: err.status ?? "queued",
+              delivered: false,
+              timedOut: true,
+              message: null,
+              note: SEND_QUEUED_NOTE,
+            };
+          if (err instanceof SendFailedError)
+            return {
+              status: err.status ?? "failed",
+              delivered: false,
+              timedOut: false,
+              message: null,
+              note: SEND_FAILED_NOTE,
+              error: err.message,
+            };
+          if (err instanceof MailFlatError) return { error: err.message };
+          throw err;
+        }
+      },
     ),
 
     markRead: defineTool(

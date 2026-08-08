@@ -25,12 +25,17 @@ public final class OutgoingAttachment {
     private static final String FALLBACK_TYPE = "application/octet-stream";
 
     /**
-     * Extension → content type, consulted BEFORE {@link Files#probeContentType(Path)}.
+     * Extension → content type. This table is the ONLY source of a guessed type.
      *
-     * <p>Probing is platform-dependent: on Linux it reads the shared MIME database, on macOS
-     * it often returns null for the very types that matter here. Guessing from the extension
-     * first makes {@code invoice.pdf} arrive as {@code application/pdf} on every machine
-     * instead of as a nameless blob on some of them.
+     * <p>{@link Files#probeContentType(Path)} used to be the fallback and was removed: it is
+     * platform-dependent, so the same code produced a different {@code content_type} depending
+     * on the machine it ran on. A {@code .bin} file went out as {@code application/macbinary}
+     * from macOS and as something else from a Linux CI runner — meaning a test written against
+     * the type passed locally and failed in CI, for a reason nobody would look for.
+     *
+     * <p>Unknown extension now means {@link #FALLBACK_TYPE}, everywhere, always. Wrong but
+     * predictable beats right-on-some-machines, and the caller can always be explicit with
+     * {@link #of(String, String, byte[])}.
      */
     private static final Map<String, String> TYPES_BY_EXTENSION = new HashMap<>();
 
@@ -42,23 +47,46 @@ public final class OutgoingAttachment {
         TYPES_BY_EXTENSION.put("gif", "image/gif");
         TYPES_BY_EXTENSION.put("webp", "image/webp");
         TYPES_BY_EXTENSION.put("svg", "image/svg+xml");
+        TYPES_BY_EXTENSION.put("bmp", "image/bmp");
+        TYPES_BY_EXTENSION.put("tif", "image/tiff");
+        TYPES_BY_EXTENSION.put("tiff", "image/tiff");
         TYPES_BY_EXTENSION.put("txt", "text/plain");
         TYPES_BY_EXTENSION.put("log", "text/plain");
+        TYPES_BY_EXTENSION.put("md", "text/markdown");
+        TYPES_BY_EXTENSION.put("rtf", "application/rtf");
         TYPES_BY_EXTENSION.put("csv", "text/csv");
+        TYPES_BY_EXTENSION.put("tsv", "text/tab-separated-values");
         TYPES_BY_EXTENSION.put("json", "application/json");
+        TYPES_BY_EXTENSION.put("ndjson", "application/x-ndjson");
+        TYPES_BY_EXTENSION.put("yaml", "application/yaml");
+        TYPES_BY_EXTENSION.put("yml", "application/yaml");
         TYPES_BY_EXTENSION.put("xml", "application/xml");
         TYPES_BY_EXTENSION.put("html", "text/html");
         TYPES_BY_EXTENSION.put("htm", "text/html");
         TYPES_BY_EXTENSION.put("zip", "application/zip");
         TYPES_BY_EXTENSION.put("gz", "application/gzip");
+        TYPES_BY_EXTENSION.put("tar", "application/x-tar");
+        TYPES_BY_EXTENSION.put("7z", "application/x-7z-compressed");
         TYPES_BY_EXTENSION.put("doc", "application/msword");
         TYPES_BY_EXTENSION.put("docx",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
         TYPES_BY_EXTENSION.put("xls", "application/vnd.ms-excel");
         TYPES_BY_EXTENSION.put("xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        TYPES_BY_EXTENSION.put("ppt", "application/vnd.ms-powerpoint");
+        TYPES_BY_EXTENSION.put("pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+        TYPES_BY_EXTENSION.put("odt", "application/vnd.oasis.opendocument.text");
+        TYPES_BY_EXTENSION.put("ods", "application/vnd.oasis.opendocument.spreadsheet");
+        TYPES_BY_EXTENSION.put("mp3", "audio/mpeg");
+        TYPES_BY_EXTENSION.put("wav", "audio/wav");
+        TYPES_BY_EXTENSION.put("mp4", "video/mp4");
+        TYPES_BY_EXTENSION.put("webm", "video/webm");
         TYPES_BY_EXTENSION.put("ics", "text/calendar");
         TYPES_BY_EXTENSION.put("eml", "message/rfc822");
+        // Explicitly binary: named here so the answer comes from the table, not from a probe.
+        TYPES_BY_EXTENSION.put("bin", FALLBACK_TYPE);
+        TYPES_BY_EXTENSION.put("dat", FALLBACK_TYPE);
     }
 
     private final String filename;
@@ -89,7 +117,10 @@ public final class OutgoingAttachment {
                     "Could not read attachment " + path + ": " + e.getMessage());
         }
         Path name = path.getFileName();
-        return of(name == null ? "attachment" : name.toString(), guessContentType(path), data);
+        String filename = name == null ? "attachment" : name.toString();
+        // Guessed from the NAME, never from the file on disk: same name → same type on every
+        // platform. of(String, String, byte[]) is there when you know better than the table.
+        return of(filename, guessContentType(filename), data);
     }
 
     /** Attach bytes you already have; the content type is guessed from the filename. */
@@ -140,23 +171,7 @@ public final class OutgoingAttachment {
         return contentBase64;
     }
 
-    private static String guessContentType(Path path) {
-        Path name = path.getFileName();
-        String fromExtension = byExtension(name == null ? "" : name.toString());
-        if (fromExtension != null) {
-            return fromExtension;
-        }
-        try {
-            String probed = Files.probeContentType(path);
-            if (probed != null && !probed.isEmpty()) {
-                return probed;
-            }
-        } catch (IOException ignored) {
-            // Probing is best-effort; an unreadable MIME database must not fail a send.
-        }
-        return FALLBACK_TYPE;
-    }
-
+    /** Deterministic by construction: the filename is the only input, on every platform. */
     private static String guessContentType(String filename) {
         String fromExtension = byExtension(filename == null ? "" : filename);
         return fromExtension != null ? fromExtension : FALLBACK_TYPE;

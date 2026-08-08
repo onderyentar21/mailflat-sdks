@@ -14,4 +14,4 @@ export { mailflatToolSuite } from "./tools";
 export type { ToolSuiteOptions, MailFlatTool } from "./tools";
 
 // package.json ile AYNI olmak zorunda — `npm test` bunu kontrol eder (src/__tests__/version.test.ts).
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";

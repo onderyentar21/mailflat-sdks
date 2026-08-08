@@ -22,6 +22,8 @@ class FakeBackend:
         self.sent = []      # every /send body (did in_reply_to actually go out?)
         self.inboxes = {}   # address -> meta
         self.emails = {}    # address -> [serialized email]
+        self.status_steps = []   # send_status handed out, one per single-message read
+        self.deleted_messages = []   # (address, id) — proves a message DELETE really landed
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         path = req.url.path
@@ -42,6 +44,18 @@ class FakeBackend:
         if method == "GET" and path.endswith("/messages"):
             addr = path.split("/api/v1/inboxes/")[1].rsplit("/messages", 1)[0]
             return httpx.Response(200, json={"ok": True, "emails": self._filtered(addr, req)})
+        if method == "GET" and "/messages/" in path:
+            # Single message — how a caller asks what happened to a mail it sent.
+            addr, _, tail = path.split("/api/v1/inboxes/")[1].partition("/messages/")
+            mid = int(tail)
+            for e in self.emails.get(addr, []):
+                if e.get("id") == mid:
+                    # Each read may advance the status, so a poll loop can be exercised
+                    # instead of being handed its answer on the first try.
+                    if self.status_steps:
+                        e["send_status"] = self.status_steps.pop(0)
+                    return httpx.Response(200, json={"ok": True, "email": e})
+            return httpx.Response(404, json={"detail": "Email not found"})
         if method == "GET" and path.endswith("/latest"):
             addr = path.split("/api/v1/inboxes/")[1].rsplit("/latest", 1)[0]
             msgs = self._filtered(addr, req)
@@ -75,6 +89,19 @@ class FakeBackend:
             # a fake that does not mimic the real contract passes tests for the wrong reason).
             return httpx.Response(202, json={"ok": True, "queued": True, "message_id": 99,
                                              "message": f"Accepted for delivery to {body['to']}"})
+        if method == "DELETE" and "/messages/" in path:
+            # Used to fall through to the inbox branch below, which happily answered
+            # "Inbox deleted" for a message delete. test_mcp_delete_message asserted only
+            # that no error came back, so it passed without the request ever being routed
+            # anywhere real — green for the wrong reason.
+            addr, _, tail = path.split("/api/v1/inboxes/")[1].partition("/messages/")
+            mid = int(tail)
+            before = len(self.emails.get(addr, []))
+            self.emails[addr] = [e for e in self.emails.get(addr, []) if e.get("id") != mid]
+            if len(self.emails[addr]) == before:
+                return httpx.Response(404, json={"detail": "Email not found"})
+            self.deleted_messages.append((addr, mid))
+            return httpx.Response(200, json={"ok": True, "message": "Email deleted"})
         if method == "DELETE" and path.startswith("/api/v1/inboxes/"):
             addr = path.split("/api/v1/inboxes/")[1]
             self.inboxes.pop(addr, None)
@@ -240,9 +267,17 @@ def test_mcp_delete_inbox(patched):
 
 def test_mcp_delete_message(patched):
     addr = server.create_inbox(label="msg-del")["address"]
-    # patched mock: calls the delete_message endpoint (the delete itself may be a no-op here)
-    res = server.delete_message(addr, 1)
+    patched.deliver(addr, id=1, subject="keep me")
+    patched.deliver(addr, id=2, subject="delete me")
+
+    res = server.delete_message(addr, 2)
+
     assert "error" not in res
+    # The message actually has to be gone. Asserting only "no error" let this test pass
+    # while the request was being answered by the inbox-delete branch of the fake.
+    assert (addr, 2) in patched.deleted_messages
+    remaining = [e["subject"] for e in server.read_messages(addr)["emails"]]
+    assert remaining == ["keep me"]
 
 
 def test_mcp_tools_registered():
@@ -251,7 +286,77 @@ def test_mcp_tools_registered():
     names = {t.name for t in tools}
     assert names == {"create_inbox", "list_inboxes", "read_messages",
                      "wait_for_otp", "wait_for_message", "send_email", "reply",
-                     "mark_read", "burn_inbox", "delete_inbox", "delete_message"}
+                     "wait_until_sent", "mark_read", "burn_inbox", "delete_inbox",
+                     "delete_message"}
+
+
+# --------------------------------------------------------------- wait_until_sent
+# send_email answers "accepted", not "delivered". These three tests cover the three ways
+# that question can end, and the timeout one is the reason the tool exists.
+
+def test_wait_until_sent_reports_delivery(patched):
+    """T1 — the mail went out: delivered=true and the message comes back."""
+    addr = server.create_inbox(label="sent")["address"]
+    mid = server.send_email(addr, to="peer@example.com", subject="hi")["message_id"]
+    patched.status_steps = ["queued", "sent"]     # second read finds it delivered
+
+    res = server.wait_until_sent(addr, mid, timeout=5)
+
+    assert res["delivered"] is True
+    assert res["status"] == "sent"
+    assert res["timed_out"] is False
+    assert res["message"]["id"] == mid
+
+
+def test_wait_until_sent_raises_on_permanent_failure(patched):
+    """T2 — the queue gave up. This one RAISES, so MCP marks the call isError."""
+    addr = server.create_inbox(label="failed")["address"]
+    mid = server.send_email(addr, to="nobody@example.com")["message_id"]
+    patched.status_steps = ["failed"]
+    for e in patched.emails[addr]:
+        if e["id"] == mid:
+            e["send_error"] = "550 unknown mailbox"
+
+    with pytest.raises(Exception, match="550 unknown mailbox"):
+        server.wait_until_sent(addr, mid, timeout=5)
+
+
+def test_wait_until_sent_timeout_does_not_read_as_failure(patched):
+    """T3 🔒 — the whole point of the tool.
+
+    A mail still on the queue is not a lost mail. If this branch reaches the model as an
+    error, or merely as the word "failed", the model's reasonable next move is to send
+    again — and the recipient gets it twice. So the timeout must come back as a normal
+    return value that says, in words, not to resend.
+    """
+    addr = server.create_inbox(label="slow")["address"]
+    mid = server.send_email(addr, to="slow@example.com")["message_id"]
+    patched.status_steps = []     # stays queued forever
+
+    res = server.wait_until_sent(addr, mid, timeout=0)
+
+    assert res["timed_out"] is True
+    assert res["delivered"] is False
+    assert res["status"] == "queued"
+    # Not the word "failed" anywhere — that single word is what flips a model to resending.
+    assert "fail" not in repr(res).lower()
+    assert "do not send it again" in res["note"].lower()
+
+
+def test_wait_until_sent_timeout_is_the_only_tool_that_does_not_raise(patched):
+    """🔒 The exception to this server's raise-on-trouble rule is deliberate and singular.
+
+    Every other tool signals trouble with ToolError so the client sets `isError`. If a
+    later edit "tidies up" wait_until_sent to match, the duplicate-mail bug comes back
+    silently — the tool would still return an answer, just the wrong kind.
+    """
+    addr = server.create_inbox(label="contract")["address"]
+    mid = server.send_email(addr, to="slow@example.com")["message_id"]
+
+    res = server.wait_until_sent(addr, mid, timeout=0)
+
+    assert isinstance(res, dict)          # returned, NOT raised
+    assert res["delivered"] is False      # ...but unmistakably "not yet delivered"
 
 
 def test_mcp_reply_threads_instead_of_starting_a_new_conversation(patched):

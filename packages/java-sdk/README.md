@@ -16,7 +16,7 @@ built-in `java.net.http` (no HTTP dependency); JSON via Jackson.
 <dependency>
   <groupId>com.github.onderyentar21</groupId>
   <artifactId>mailflat-sdks</artifactId>
-  <version>v0.4.0</version>
+  <version>v0.4.1</version>
 </dependency>
 ```
 
@@ -24,7 +24,7 @@ Gradle:
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.4.0' }
+dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.4.1' }
 ```
 
 ## Quickstart
@@ -112,6 +112,13 @@ SendResult r = inbox.send("finance@acme.com", SendOptions.builder()
 Attachment size and count depend on your plan (free is deliberately small); going over is
 rejected with the limit spelled out rather than silently dropping the file.
 
+**Fixed in 0.4.1 — the content type no longer depends on the machine.** It is guessed from
+the file *name* alone, against a fixed table; an unknown extension is `application/octet-stream`
+everywhere. Before 0.4.1 an unmapped extension fell through to `Files.probeContentType()`,
+which answers differently per platform — `payload.bin` went out as `application/macbinary`
+from macOS and as something else from a Linux CI runner. Pass the type yourself when you know
+better: `OutgoingAttachment.of("data.dat", "application/vnd.acme+binary", bytes)`.
+
 ### "Did it actually go out?"
 
 `send()` returns when the mail is **accepted for delivery** (HTTP 202), not when it is
@@ -171,6 +178,11 @@ All extend `MailFlatException`: `AuthenticationException` (401), `PermissionExce
 end-to-end encrypted, so the server cannot read it — use a non-encrypted inbox for automation),
 `SendFailedException` / `SendTimeoutException` (both `SendException`, carrying `messageId()`
 and `sendStatus()` — see `waitUntilSent` above for why they are two types and not one).
+
+A message or attachment id that is not in an inbox you own throws `NotFoundException`. An inbox
+you do not own always throws `PermissionException`, whether or not it exists — the API will not
+confirm other people's addresses. So the two answer different questions: "wrong id" versus
+"wrong key".
 
 ## License
 
