@@ -38,16 +38,28 @@ if TYPE_CHECKING:  # avoid a circular import (type hint only)
 DIRECTIONS = ("in", "out", "all")
 
 
+#: The server's `subject` column limit. A reply built from a long inbound subject must fit.
+MAX_SUBJECT_CHARS = 200
+
+
 def _reply_subject(subject: str | None) -> str:
     """`Re:` prefix without doubling it up.
 
     Mail clients also use the subject when threading, so "Re: Re: Re: x" and a bare subject
     both risk breaking the conversation apart.
+
+    A reply subject the SDK BUILDS ITSELF must fit the server's limit. A stored message can
+    legitimately have a 198-character subject — inbound mail is not bound by our API limit —
+    and `"Re: " + subject` then exceeds 200, so `reply()` refused to answer a message the
+    service itself had accepted. The agent had no way out: the helper neither trimmed nor
+    explained. Truncating a value WE derived is different from truncating the caller's
+    input; the caller's own `subject=` is still rejected when too long, because they can fix it.
     """
     text = (subject or "").strip()
     if not text:
         return "Re:"
-    return text if text.lower().startswith("re:") else f"Re: {text}"
+    reply = text if text.lower().startswith("re:") else f"Re: {text}"
+    return reply if len(reply) <= MAX_SUBJECT_CHARS else reply[:MAX_SUBJECT_CHARS - 1] + "…"
 
 
 def _encode_attachment(item: Any) -> dict[str, str]:

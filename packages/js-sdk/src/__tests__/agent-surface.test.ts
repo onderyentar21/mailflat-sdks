@@ -6,6 +6,7 @@
 // Connected to:
 //   - exercises: ../client.ts, ../inbox.ts, ../types.ts, ../errors.ts
 
+import { MAX_SUBJECT_CHARS, replySubject } from "../types";
 import { describe, expect, it, vi } from "vitest";
 import { MailFlat, MailFlatError, RateLimitError, VERSION } from "../index";
 
@@ -392,5 +393,23 @@ describe("reply target", () => {
     expect((await mf.inbox(ADDR).latest())!.replyToAddress).toBe("first@acme.com");
     mf = msgWith({ "Reply-To": "not-an-address", From: "Real <real@acme.com>" });
     expect((await mf.inbox(ADDR).latest())!.replyToAddress).toBe("real@acme.com");
+  });
+});
+
+describe("reply() can answer a message the service accepted", () => {
+  // Round 8 #4: inbound mail is not bound by our 200-char API limit, so a stored
+  // 198-character subject made `"Re: " + subject` exceed it and `reply()` refused —
+  // a message the service itself had accepted became permanently unanswerable, with
+  // no trim and no explanation offered.
+  it("🔒 a long inbound subject still produces a usable reply subject", () => {
+    const long = "K".repeat(198);
+    const subject = replySubject(long);
+    expect(subject.length).toBeLessThanOrEqual(MAX_SUBJECT_CHARS);
+    expect(subject.startsWith("Re: ")).toBe(true);
+    expect(subject.endsWith("…")).toBe(true);
+  });
+
+  it("a normal subject is untouched", () => {
+    expect(replySubject("Your code")).toBe("Re: Your code");
   });
 });

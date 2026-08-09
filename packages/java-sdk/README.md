@@ -16,7 +16,7 @@ built-in `java.net.http` (no HTTP dependency); JSON via Jackson.
 <dependency>
   <groupId>com.github.onderyentar21</groupId>
   <artifactId>mailflat-sdks</artifactId>
-  <version>v0.4.2</version>
+  <version>v0.4.3</version>
 </dependency>
 ```
 
@@ -24,7 +24,7 @@ Gradle:
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.4.2' }
+dependencies { implementation 'com.github.onderyentar21:mailflat-sdks:v0.4.3' }
 ```
 
 ## Quickstart

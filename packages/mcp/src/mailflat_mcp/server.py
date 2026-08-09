@@ -77,31 +77,41 @@ def _client() -> MailFlat:
 
 
 
-def _reject_unknown(tool: str, unknown: dict) -> None:
-    """Say so when the model invents a field — never swallow it.
+def _forbid_unknown_arguments() -> None:
+    """Make every registered tool REFUSE an argument it does not declare.
 
-    On a model surface the party inventing the field name is the model itself, which makes
-    this the one surface that must show the server's "no such field here" answer. The code
-    SDK was fixed for this (B-077) and the model surfaces were left behind:
-    `create_inbox {"public_key": "PGP"}` returned 200 and produced a PLAINTEXT inbox — the
-    exact false belief we thought we had removed, one door over.
+    Why here and not in the signatures: the first attempt added `**unknown` to each tool
+    and raised from the body. FastMCP builds each tool's JSON schema FROM THE SIGNATURE,
+    and it does not understand a VAR_KEYWORD parameter — it turned `unknown` into an
+    ordinary property with no default, i.e. a REQUIRED one. The result was a condition no
+    caller could satisfy: omit it and the server says `Field required`, pass it and the
+    body says `does not accept: unknown`. Ten of twelve tools became uncallable, and the
+    package shipped that way.
 
-    Swallowing it does not merely hide the mistake, it REINFORCES it: the field looks
-    accepted, so the model uses it again, and the result is quietly wrong every time.
+    It shipped because the test called the functions DIRECTLY in Python, never through the
+    MCP call path — the same "inspected, not called" mistake that let the original bug
+    (unknown fields silently dropped) survive a whole round. A single real `call_tool`
+    would have caught it. `tests/test_mcp.py` now goes through that path.
+
+    The correct seam is the model FastMCP already validates against: flipping it to
+    `extra="forbid"` makes the refusal happen where arguments arrive, names the offending
+    field, and leaves the published schema honest (`additionalProperties: false`) so a
+    client can see the rule without calling.
     """
-    if unknown:
-        names = ", ".join(sorted(unknown))
-        raise ToolError(
-            f"{tool} does not accept: {names}. Remove the field(s) and try again; "
-            f"nothing was created or sent.")
+    for tool in mcp._tool_manager._tools.values():
+        arg_model = tool.fn_metadata.arg_model
+        arg_model.model_config["extra"] = "forbid"
+        arg_model.model_rebuild(force=True)
+        schema = tool.parameters
+        if isinstance(schema, dict):
+            schema["additionalProperties"] = False
 
 
 @mcp.tool()
-def create_inbox(prefix: str = "", label: str = "", retention_hours: int = 0, **unknown) -> dict:
+def create_inbox(prefix: str = "", label: str = "", retention_hours: int = 0) -> dict:
     """Create a real disposable email inbox. Returns the inbox address.
     `label` needs a paid plan; on free it is reported back in `ignored_fields`.
     `retention_hours` is optional (0 = your plan's max); requests above your plan are capped."""
-    _reject_unknown("create_inbox", unknown)
     try:
         with _client() as c:
             inbox = c.create(
@@ -114,9 +124,8 @@ def create_inbox(prefix: str = "", label: str = "", retention_hours: int = 0, **
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def list_inboxes(**unknown) -> dict:
+def list_inboxes() -> dict:
     """List all inboxes available to this API key."""
-    _reject_unknown("list_inboxes", unknown)
     try:
         with _client() as c:
             return redact_secrets({"ok": True, "inboxes": [i.raw for i in c.list()]})
@@ -124,13 +133,12 @@ def list_inboxes(**unknown) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def read_messages(address: str, direction: str = "in", **unknown) -> dict:
+def read_messages(address: str, direction: str = "in") -> dict:
     """Read messages in the given inbox address (newest first).
 
     `direction` is "in" for received mail (default), "out" for mail sent from this
     address, or "all" for both. Received mail is the default so that a reply you are
     waiting for is not confused with a message you just sent."""
-    _reject_unknown("read_messages", unknown)
     try:
         with _client() as c:
             msgs = c.inbox(address).messages(direction=direction)
@@ -141,9 +149,8 @@ def read_messages(address: str, direction: str = "in", **unknown) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def wait_for_otp(address: str, timeout: int = 30, **unknown) -> dict:
+def wait_for_otp(address: str, timeout: int = 30) -> dict:
     """Poll the inbox until an OTP code arrives (or timeout). Returns {otp_code, email}."""
-    _reject_unknown("wait_for_otp", unknown)
     try:
         with _client() as c:
             inbox = c.inbox(address)
@@ -161,12 +168,11 @@ def wait_for_otp(address: str, timeout: int = 30, **unknown) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def wait_for_message(address: str, timeout: int = 30, **unknown) -> dict:
+def wait_for_message(address: str, timeout: int = 30) -> dict:
     """Poll the inbox until a new message ARRIVES (or timeout). Returns {email}.
 
     Only received mail counts, so you can send to a peer and then wait for their reply
     without matching your own outgoing message."""
-    _reject_unknown("wait_for_message", unknown)
     try:
         with _client() as c:
             msg = c.inbox(address).wait_for_message(timeout=timeout)
@@ -218,7 +224,7 @@ def reply(address: str, message_id: int, body: str = "", html: str = "",
 
 
 @mcp.tool()
-def wait_until_sent(address: str, message_id: int, timeout: int = 60, **unknown) -> dict:
+def wait_until_sent(address: str, message_id: int, timeout: int = 60) -> dict:
     """Find out whether a mail you sent was actually delivered.
 
     send_email only means "accepted for delivery"; the mail goes out later on a queue. Call
@@ -227,7 +233,6 @@ def wait_until_sent(address: str, message_id: int, timeout: int = 60, **unknown)
     Returns `delivered: true` once it went out. If it is still queued when the timeout
     elapses you get `timed_out: true` with `delivered: false` — that is NOT a failure and
     you must NOT send the mail again; the queue is still retrying."""
-    _reject_unknown("wait_until_sent", unknown)
     try:
         with _client() as c:
             return sent_result(c.inbox(address).wait_until_sent(message_id, timeout=timeout))
@@ -245,9 +250,8 @@ def wait_until_sent(address: str, message_id: int, timeout: int = 60, **unknown)
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def mark_read(address: str, message_id: int, **unknown) -> dict:
+def mark_read(address: str, message_id: int) -> dict:
     """Mark one message as read so later polls can skip it."""
-    _reject_unknown("mark_read", unknown)
     try:
         with _client() as c:
             return redact_secrets(c.inbox(address).mark_read(message_id))
@@ -255,11 +259,10 @@ def mark_read(address: str, message_id: int, **unknown) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def burn_inbox(address: str, **unknown) -> dict:
+def burn_inbox(address: str) -> dict:
     """Delete every message in an inbox but KEEP the address.
 
     Use between scenarios: the address stays registered wherever you already used it."""
-    _reject_unknown("burn_inbox", unknown)
     try:
         with _client() as c:
             return redact_secrets(c.inbox(address).burn())
@@ -267,9 +270,8 @@ def burn_inbox(address: str, **unknown) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def delete_inbox(address: str, **unknown) -> dict:
+def delete_inbox(address: str) -> dict:
     """Delete an inbox and all its messages by address. Irreversible."""
-    _reject_unknown("delete_inbox", unknown)
     try:
         with _client() as c:
             return redact_secrets(c.inbox(address).delete())
@@ -277,14 +279,66 @@ def delete_inbox(address: str, **unknown) -> dict:
         raise ToolError(str(e)) from e
 
 @mcp.tool()
-def delete_message(address: str, message_id: int, **unknown) -> dict:
+def delete_message(address: str, message_id: int) -> dict:
     """Delete a single message in an inbox by its id (the inbox itself stays)."""
-    _reject_unknown("delete_message", unknown)
     try:
         with _client() as c:
             return redact_secrets(c.inbox(address).delete_message(message_id))
     except MailFlatError as e:
         raise ToolError(str(e)) from e
+
+def _sentence_for(tool_name: str, exc: Exception) -> str:
+    """Turn a pydantic argument error into the sentence style the REST API already uses.
+
+    The REST layer has translated validation errors into sentences since B-069, but the
+    TOOL CALL boundary never went through that translation: FastMCP renders pydantic's own
+    output and it lands verbatim in model context —
+    `1 validation error for read_messagesArguments … input_value={'address': '…'},
+    input_type=dict … https://errors.pydantic.dev/2.13/v/missing`.
+
+    That is four leaks in one string: a dict repr, a Python type name, an internal class
+    name, and a third-party URL. Same class we closed on HTTP, a different boundary. A
+    model reading this learns nothing it can act on, and the values it echoes back are the
+    caller's own arguments.
+    """
+    errors = getattr(exc, "errors", None)
+    details: list[str] = []
+    if callable(errors):
+        for err in errors()[:3]:
+            field = ".".join(str(p) for p in err.get("loc", ())) or "input"
+            kind = err.get("type", "")
+            if kind == "extra_forbidden":
+                details.append(f"'{field}' is not an argument {tool_name} accepts")
+            elif kind == "missing":
+                details.append(f"'{field}' is required")
+            else:
+                details.append(f"'{field}': {err.get('msg', 'invalid value')}")
+    if not details:
+        return f"{tool_name}: the arguments are not valid."
+    return f"{tool_name}: " + "; ".join(details) + "."
+
+
+def _clean_tool_errors() -> None:
+    """Wrap argument validation so pydantic's raw output never reaches the model."""
+    manager = mcp._tool_manager
+    original = manager.call_tool
+
+    async def call_tool(name, arguments, *args, **kwargs):
+        try:
+            return await original(name, arguments, *args, **kwargs)
+        except ToolError as exc:
+            cause = exc.__cause__ or exc.__context__
+            if cause is not None and callable(getattr(cause, "errors", None)):
+                raise ToolError(_sentence_for(name, cause)) from None
+            raise
+
+    manager.call_tool = call_tool
+
+
+# The tools are registered above; the locks must be applied AFTER that.
+_forbid_unknown_arguments()
+_clean_tool_errors()
+
 
 def main():
     mcp.run()  # stdio transport (MCP clients connect to this)

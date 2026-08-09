@@ -265,12 +265,23 @@ public final class Message {
     }
 
     /** {@code Re:} prefix without doubling it up; clients also thread on the subject. */
+    /** The server's {@code subject} column limit. */
+    static final int MAX_SUBJECT_CHARS = 200;
+
     static String replySubject(String subject) {
         String s = subject == null ? "" : subject.trim();
         if (s.isEmpty()) {
             return "Re:";
         }
-        return s.toLowerCase().startsWith("re:") ? s : "Re: " + s;
+        String reply = s.toLowerCase().startsWith("re:") ? s : "Re: " + s;
+        // A reply subject the SDK BUILDS ITSELF must fit the server's limit. Inbound mail is
+        // not bound by our API limit, so a stored 198-character subject made "Re: " + it
+        // exceed 200 and reply() refused to answer a message the service had accepted.
+        // Truncating a value WE derived differs from truncating the caller's input: an
+        // explicit subject that is too long is still rejected, because they can fix it.
+        return reply.length() <= MAX_SUBJECT_CHARS
+                ? reply
+                : reply.substring(0, MAX_SUBJECT_CHARS - 1) + "\u2026";
     }
 
     /** Mark this message as read, so the next poll can skip it. */

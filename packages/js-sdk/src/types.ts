@@ -155,10 +155,25 @@ export interface ReplyOptions {
 }
 
 /** `Re:` prefix without doubling it up (clients also thread on the subject). */
+/** The server's `subject` column limit. A reply built from a long inbound subject must fit. */
+export const MAX_SUBJECT_CHARS = 200;
+
+/**
+ * A reply subject the SDK BUILDS ITSELF must fit the server's limit.
+ *
+ * A stored message can legitimately have a 198-character subject — inbound mail is not
+ * bound by our API limit — and `"Re: " + subject` then exceeds 200, so `reply()` refused to
+ * answer a message the service itself had accepted, with no way out offered. Truncating a
+ * value WE derived is not the same as truncating the caller's input: an explicit
+ * `subject:` that is too long is still rejected, because the caller can fix that.
+ */
 export function replySubject(subject?: string | null): string {
   const text = (subject || "").trim();
   if (!text) return "Re:";
-  return text.toLowerCase().startsWith("re:") ? text : `Re: ${text}`;
+  const reply = text.toLowerCase().startsWith("re:") ? text : `Re: ${text}`;
+  return reply.length <= MAX_SUBJECT_CHARS
+    ? reply
+    : reply.slice(0, MAX_SUBJECT_CHARS - 1) + "\u2026";
 }
 
 /** Convert an /api/v1 attachment payload (snake_case) to `Attachment` (camelCase). */

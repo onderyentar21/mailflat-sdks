@@ -10,6 +10,8 @@ import httpx
 import pytest
 from mailflat import MailFlat
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from mailflat_mcp import server
 
 ADDR = "agent-7f3@x7k2m.mailflat.net"
@@ -417,40 +419,51 @@ def test_server_reports_its_own_version_not_the_mcp_library(patched):
 
 
 # ============================================== unknown arguments (round 7 #1)
-def test_every_tool_refuses_an_unknown_argument():
-    """A field the model invents must never be swallowed — on any tool.
+def test_every_tool_is_callable_and_refuses_unknown_arguments():
+    """Go through the MCP CALL PATH, not the Python function.
 
-    Fixed in the code SDK as B-077; the model surfaces (MCP, ai-sdk) were skipped, and
-    `create_inbox {"public_key": "PGP"}` returned 200 with a PLAINTEXT inbox — the false
-    belief we thought we had removed, still standing one door over.
+    The previous version of this test called the tool functions directly and passed while
+    the published package was unusable: `**unknown` in the signature made FastMCP publish
+    `unknown` as a REQUIRED property, so ten of twelve tools could not be called at all —
+    omit it and the server says `Field required`, pass it and the body refuses it. A direct
+    Python call never touches that schema, so the test saw none of it.
 
-    The tool list is ENUMERATED: a tool added tomorrow is covered without anyone adding a
-    line here.
+    That is the same mistake, one layer down, as the bug this test was written for: proving
+    a surface by INSPECTING it instead of CALLING it. So this version calls.
+
+    Two things are asserted per tool: the declared schema does not demand anything
+    synthetic, and an unknown argument is refused by name through the real path.
     """
-    import inspect
-    from mcp.server.fastmcp.exceptions import ToolError
+    import asyncio
 
     import mailflat_mcp.server as srv
 
-    checked = 0
-    for name in dir(srv):
-        fn = getattr(srv, name)
-        if not inspect.isfunction(fn) or name.startswith("_"):
-            continue
-        params = inspect.signature(fn).parameters
-        if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-            continue
-        required = {n: "x" for n, p in params.items()
-                    if p.default is inspect.Parameter.empty
-                    and p.kind is not inspect.Parameter.VAR_KEYWORD}
-        for n, p in params.items():
-            if n in required and p.annotation is int:
-                required[n] = 1
-        try:
-            fn(**required, zzz_unknown_field="boom")
-            raise AssertionError(f"{name}: accepted an unknown field")
-        except ToolError as exc:
-            assert "zzz_unknown_field" in str(exc), f"{name}: did not name the field"
-        checked += 1
+    # `asyncio.run` on purpose: adding pytest-asyncio would put a test-only dependency in a
+    # PUBLISHED package's tree for one test. The call path is the same either way.
+    tools = asyncio.run(srv.mcp.list_tools())
+    assert len(tools) >= 10, f"only {len(tools)} tools registered"
 
-    assert checked >= 10, f"only {checked} tools scanned — enumeration may be broken"
+    for tool in tools:
+        schema = tool.inputSchema or {}
+        declared = set(schema.get("properties", {}))
+        required = set(schema.get("required", []))
+
+        assert "unknown" not in declared, (
+            f"{tool.name}: a synthetic 'unknown' argument is published in the schema — "
+            "this is what made the tools uncallable")
+        assert required <= declared, (
+            f"{tool.name}: requires {required - declared}, which it does not declare — "
+            "no caller can satisfy that")
+        assert schema.get("additionalProperties") is False, (
+            f"{tool.name}: schema does not close itself; a client cannot see the rule "
+            "without calling")
+
+        with pytest.raises(ToolError) as excinfo:
+            asyncio.run(srv.mcp.call_tool(tool.name, {"zzz_unknown_field": "boom"}))
+        message = str(excinfo.value)
+        assert "zzz_unknown_field" in message, f"{tool.name}: did not name the field"
+        # The sentence must not carry pydantic's internals into model context.
+        for leak in ("input_value=", "input_type=", "errors.pydantic.dev", "Arguments"):
+            assert leak not in message, f"{tool.name}: leaked {leak!r} -> {message[:120]}"
+
+
