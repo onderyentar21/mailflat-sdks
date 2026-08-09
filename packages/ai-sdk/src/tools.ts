@@ -74,7 +74,35 @@ function defineTool(
   schema: z.ZodTypeAny,
   execute: (args: any) => Promise<any>,
 ): MailFlatTool {
-  return { description, parameters: schema, inputSchema: schema, execute };
+  // TWO things happen here, both in ONE place so a tool added tomorrow cannot miss them.
+  //
+  // 1. `.strict()`. zod objects default to `strip`: a key the schema does not declare is
+  //    silently REMOVED and the call proceeds. That is B-077 all over again, and on the
+  //    worst possible surface — here the party inventing the field name is the MODEL, so
+  //    this is the one place that must show it the server's "not accepted here" answer.
+  //    We fixed the code SDK and left the model surfaces; an external round found them.
+  //
+  // 2. Validation inside `execute`. The AI SDK runtime validates before calling us, but a
+  //    caller (or a different runtime) can invoke `execute` directly — as the reviewer did.
+  //    Relying on someone else to validate is how the first version passed its own tests.
+  const strict = schema instanceof z.ZodObject ? schema.strict() : schema;
+
+  const checked = async (args: any) => {
+    const parsed = strict.safeParse(args ?? {});
+    if (!parsed.success) {
+      // Returned, not thrown: model surfaces read errors as values (see `guarded`).
+      const unknown = parsed.error.issues
+        .filter((i) => i.code === "unrecognized_keys")
+        .flatMap((i: any) => i.keys ?? []);
+      const detail = unknown.length
+        ? `Unknown field(s): ${unknown.join(", ")}. This tool does not accept them.`
+        : parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; ");
+      return { error: `Invalid arguments. ${detail}` };
+    }
+    return execute(parsed.data);
+  };
+
+  return { description, parameters: strict, inputSchema: strict, execute: checked };
 }
 
 // Turns a MailFlatError into a plain result the model can act on (instead of throwing) AND
@@ -115,7 +143,10 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
         label: z
           .string()
           .optional()
-          .describe("Optional human label to remember what this inbox is for."),
+          .describe(
+            "Optional human label for the inbox. Paid plans only: on the free plan the "
+            + "inbox is still created and the response lists `label` under `ignored_fields`.",
+          ),
         retentionHours: z
           .number()
           .int()
@@ -165,7 +196,10 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
         timeout: z
           .number()
           .int()
-          .positive()
+          // 0 is legal and means \"check once, do not wait\" — `.positive()` here was
+          // declared but never enforced (execute did not validate), so the
+          // constraint and the behaviour disagreed for as long as it existed.
+          .nonnegative()
           .optional()
           .describe("Maximum milliseconds to wait before giving up (default 30000)."),
       }),
@@ -194,7 +228,10 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
         timeout: z
           .number()
           .int()
-          .positive()
+          // 0 is legal and means \"check once, do not wait\" — `.positive()` here was
+          // declared but never enforced (execute did not validate), so the
+          // constraint and the behaviour disagreed for as long as it existed.
+          .nonnegative()
           .optional()
           .describe("Maximum milliseconds to wait before giving up (default 30000)."),
       }),
@@ -257,7 +294,10 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
         timeout: z
           .number()
           .int()
-          .positive()
+          // 0 is legal and means \"check once, do not wait\" — `.positive()` here was
+          // declared but never enforced (execute did not validate), so the
+          // constraint and the behaviour disagreed for as long as it existed.
+          .nonnegative()
           .optional()
           .describe("Maximum milliseconds to wait for a final state (default 60000)."),
       }),

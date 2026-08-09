@@ -205,6 +205,16 @@ def test_wait_until_sent_raises_on_failure_and_on_timeout(kind):
     with pytest.raises(SendTimeoutError, match="still be delivered"):
         run(queued.inbox(ADDR).wait_until_sent(7, timeout=0.02, poll_interval=0.01))
 
+    # Both clients must report the last attempt IDENTICALLY. The sentence lives in
+    # `_http.send_timeout_message` for exactly this reason: two copies drift, and a shape
+    # comparison would happily pass two differently worded sentences.
+    retrying = make(kind, lambda r: httpx.Response(200, json={
+        "email": {"id": 7, "send_status": "retrying", "send_error": "451 greylisted"}}))
+    with pytest.raises(SendTimeoutError) as excinfo:
+        run(retrying.inbox(ADDR).wait_until_sent(7, timeout=0.02, poll_interval=0.01))
+    assert excinfo.value.last_error == "451 greylisted"
+    assert "451 greylisted" in str(excinfo.value)
+
 
 @BOTH
 def test_user_agent_is_identical(kind):

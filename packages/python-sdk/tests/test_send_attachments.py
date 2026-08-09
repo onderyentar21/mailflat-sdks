@@ -207,3 +207,34 @@ def test_message_by_id_hits_the_single_message_endpoint():
     client = make_client(handler)
     assert client.inbox(ADDR).message(42).id == 42
     assert seen == [f"/api/v1/inboxes/{ADDR}/messages/42"]
+
+
+def test_wait_until_sent_timeout_reports_what_the_last_attempt_said():
+    """A timeout that describes nothing is a timeout the caller cannot act on.
+
+    The queue distinguishes "accepted, never attempted" (`queued`) from "attempted, did
+    not get through" (`retrying`), and on the second one it knows WHY. Before this, both
+    produced the same sentence — "it may still be delivered" — which was true but useless:
+    greylisting held for two minutes and a recipient nobody will ever reach read alike.
+    """
+    client, _ = _status_client([{"send_status": "retrying",
+                                 "send_error": "451 4.7.1 Greylisted, try again later"}])
+    with pytest.raises(SendTimeoutError) as excinfo:
+        client.inbox(ADDR).wait_until_sent(7, timeout=0.05, poll_interval=0.01)
+
+    err = excinfo.value
+    assert err.status == "retrying"
+    assert err.last_error == "451 4.7.1 Greylisted, try again later"
+    assert "451 4.7.1 Greylisted" in str(err)
+    # Still NOT a failure: the sentence must keep saying the queue is working on it.
+    assert "keeps retrying" in str(err)
+
+
+def test_wait_until_sent_timeout_says_nothing_extra_when_never_attempted():
+    """`queued` with no attempt yet has no reason to report — don't invent one."""
+    client, _ = _status_client([{"send_status": "queued"}])
+    with pytest.raises(SendTimeoutError) as excinfo:
+        client.inbox(ADDR).wait_until_sent(7, timeout=0.05, poll_interval=0.01)
+
+    assert excinfo.value.last_error is None
+    assert "last attempt reported" not in str(excinfo.value)

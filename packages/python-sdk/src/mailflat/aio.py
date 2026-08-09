@@ -42,7 +42,8 @@ from typing import Any
 
 import httpx
 
-from ._http import backoff_delay, error_detail, interpret, retry_after_seconds, should_retry
+from ._http import (backoff_delay, error_detail, interpret, retry_after_seconds,
+                    send_timeout_message, should_retry)
 from .errors import (EncryptedInboxError, MailFlatError, OTPTimeoutError, SendFailedError,
                      SendTimeoutError, raise_for_status)
 from .inbox import (Attachment, Message, _check_direction, _reply_subject,
@@ -233,9 +234,9 @@ class AsyncInbox:
                                       message_id=message_id, status=status)
             if time.monotonic() >= deadline:
                 raise SendTimeoutError(
-                    f"Message {message_id} was still {status or 'queued'} after "
-                    f"{timeout:g}s. It may still be delivered; the queue keeps retrying.",
-                    message_id=message_id, status=status)
+                    send_timeout_message(message_id, status, timeout, message.send_error),
+                    message_id=message_id, status=status,
+                    last_error=message.send_error)
             await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
     async def mark_read(self, message_id: int) -> dict[str, Any]:

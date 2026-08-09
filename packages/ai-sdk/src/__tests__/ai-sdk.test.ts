@@ -338,3 +338,45 @@ describe("secret redaction", () => {
     expect(inbox.apiKey ?? inbox.raw.api_key).toBe("mf_sk_visible");
   });
 });
+
+describe("unknown fields reach the server or are refused — never dropped", () => {
+  // Round 7 #1. The code SDK was fixed (B-077) and the MODEL surfaces were not: zod objects
+  // default to `strip`, so a field the model invents is deleted before the request and the
+  // server's "not accepted here" answer never happens. That is the worst surface to leave
+  // open, because here the party inventing the field name IS the model.
+  it("🔒 refuses an unknown field instead of silently dropping it", async () => {
+    const { suite, fetchMock } = makeSuite(() => jsonResponse(200, { address: ADDR }));
+    const res = await suite.createInbox.execute({ public_key: "PGP", label: "x" } as any);
+
+    expect(res.error, "unknown field was accepted").toBeTruthy();
+    expect(String(res.error)).toContain("public_key");
+    expect(fetchMock.mock.calls.length, "a refused call must not reach the server").toBe(0);
+  });
+
+  it("🔒 the same holds for send", async () => {
+    const { suite } = makeSuite(() => jsonResponse(202, { queued: true, message_id: 1 }));
+    const res = await suite.sendEmail.execute({
+      address: ADDR, to: "a@b.com", subject: "s", body: "b", priority: "high",
+    } as any);
+    expect(res.error).toBeTruthy();
+    expect(String(res.error)).toContain("priority");
+  });
+
+  it("every tool refuses unknown fields — coverage, not examples", async () => {
+    // Enumerating the suite is the point: a tool added tomorrow is covered without anyone
+    // remembering to add a case here.
+    const { suite } = makeSuite(() => jsonResponse(200, {}));
+    for (const [name, tool] of Object.entries(suite)) {
+      const res: any = await (tool as any).execute({ zzz_unknown_field: 1 });
+      expect(res?.error, `${name} accepted an unknown field`).toBeTruthy();
+      expect(String(res.error), `${name} did not name the field`).toContain("zzz_unknown_field");
+    }
+  });
+
+  it("valid arguments still work", async () => {
+    // Negative control: refusing everything would pass all three tests above.
+    const { suite } = makeSuite(() => jsonResponse(200, { address: ADDR }));
+    const res: any = await suite.createInbox.execute({ prefix: "ok", label: "fine" });
+    expect(res.error).toBeFalsy();
+  });
+});

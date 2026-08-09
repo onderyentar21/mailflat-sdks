@@ -414,3 +414,43 @@ def test_server_reports_its_own_version_not_the_mcp_library(patched):
     from mailflat_mcp import __version__
     assert getattr(server.mcp._mcp_server, "version", None) == __version__
     assert __version__ != "1.29.0"
+
+
+# ============================================== unknown arguments (round 7 #1)
+def test_every_tool_refuses_an_unknown_argument():
+    """A field the model invents must never be swallowed — on any tool.
+
+    Fixed in the code SDK as B-077; the model surfaces (MCP, ai-sdk) were skipped, and
+    `create_inbox {"public_key": "PGP"}` returned 200 with a PLAINTEXT inbox — the false
+    belief we thought we had removed, still standing one door over.
+
+    The tool list is ENUMERATED: a tool added tomorrow is covered without anyone adding a
+    line here.
+    """
+    import inspect
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    import mailflat_mcp.server as srv
+
+    checked = 0
+    for name in dir(srv):
+        fn = getattr(srv, name)
+        if not inspect.isfunction(fn) or name.startswith("_"):
+            continue
+        params = inspect.signature(fn).parameters
+        if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            continue
+        required = {n: "x" for n, p in params.items()
+                    if p.default is inspect.Parameter.empty
+                    and p.kind is not inspect.Parameter.VAR_KEYWORD}
+        for n, p in params.items():
+            if n in required and p.annotation is int:
+                required[n] = 1
+        try:
+            fn(**required, zzz_unknown_field="boom")
+            raise AssertionError(f"{name}: accepted an unknown field")
+        except ToolError as exc:
+            assert "zzz_unknown_field" in str(exc), f"{name}: did not name the field"
+        checked += 1
+
+    assert checked >= 10, f"only {checked} tools scanned — enumeration may be broken"

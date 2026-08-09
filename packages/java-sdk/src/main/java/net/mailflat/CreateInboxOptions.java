@@ -35,6 +35,7 @@ public final class CreateInboxOptions {
         private Integer retentionHours;
 
         public Builder prefix(String v)         { this.prefix = v; return this; }
+        /** Display name. Paid plans only: on free the server reports it in {@code ignored_fields}. */
         public Builder label(String v)          { this.label = v; return this; }
         public Builder subdomain(String v)      { this.subdomain = v; return this; }
         public Builder domain(String v)         { this.domain = v; return this; }

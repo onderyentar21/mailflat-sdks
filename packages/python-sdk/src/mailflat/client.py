@@ -174,7 +174,8 @@ class MailFlat:
         """Create a new inbox and return it as an `Inbox`.
 
         - prefix: local part of the address (random `agent-...` when omitted)
-        - label: display name shown in the dashboard
+        - label: display name shown in the dashboard (paid plans only — on Free the
+          response carries `ignored_fields` saying it had no effect)
         - subdomain: mailflat.net subdomain (random when omitted)
         - domain: one of your own verified BYOD domains, e.g. `acme.com`
         - retention_hours: how long messages are kept (defaults to your plan, capped by it)

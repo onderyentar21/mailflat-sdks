@@ -16,6 +16,7 @@ import {
   SendTimeoutError,
 } from "./errors";
 import type { MailFlat } from "./client";
+import { buildPayload, SEND_FIELDS } from "./payload";
 import {
   DIRECTIONS,
   type Direction,
@@ -87,17 +88,53 @@ export class Inbox {
   readonly encrypted: boolean;
   readonly raw: Record<string, any>;
 
+  // ES private field, NOT TypeScript `private`. The difference is what B-079 turned on:
+  // `private` is erased at compile time, so the client object stayed an ordinary
+  // enumerable property at runtime and `console.log(inbox)` / `JSON.stringify(inbox)`
+  // printed the ACCOUNT key (mf_live_…) sitting inside it. A `#` field is invisible to
+  // both. An agent logging an inbox to debug is normal; leaking the account key is not.
+  #client: MailFlat;
+
   constructor(
-    private client: MailFlat,
+    client: MailFlat,
     address: string,
     meta: Record<string, any> = {},
   ) {
+    this.#client = client;
     this.address = address;
     this.name = meta.name;
     this.apiKey = meta.api_key;
     this.retentionHours = meta.retention_hours;
     this.encrypted = Boolean(meta.encrypted);
     this.raw = { address, ...meta };
+  }
+
+  /**
+   * What `console.log(inbox)` prints. Node calls `util.inspect`, NOT `toString`, so a
+   * class that only cleans up `toString` is clean in a place nobody looks.
+   *
+   * The per-inbox key (`mf_sk_…`) used to print here. The account key was fixed in B-079;
+   * this one stayed, and an external round found it. It is a value the owner already
+   * knows — but "already known to the owner" is not where the risk lives: the risk is CI
+   * output, issue reports and screenshots, which is the same risk the account key had.
+   * Python's `Inbox` already excluded it from `repr`, so this was also a parity break:
+   * the same protection existed on one surface and not the other.
+   *
+   * `inbox.apiKey` still reads the value — hiding it from a printout is not the same as
+   * taking it away from code that needs it.
+   */
+  [Symbol.for("nodejs.util.inspect.custom")]() {
+    return `Inbox { address: ${JSON.stringify(this.address)}, `
+      + `retentionHours: ${this.retentionHours}, encrypted: ${this.encrypted}, `
+      + `apiKey: [hidden — read inbox.apiKey] }`;
+  }
+
+  /** Same rule for `JSON.stringify(inbox)`: the key does not travel in serialised output. */
+  toJSON() {
+    const { apiKey, raw, ...rest } = this as any;
+    const safeRaw = { ...(raw || {}) };
+    delete safeRaw.api_key;
+    return { ...rest, raw: safeRaw };
   }
 
   // Wraps an API payload into a Message and attaches the delete/markRead/download helpers.
@@ -141,7 +178,7 @@ export class Inbox {
    */
   async messages(opts: ReadOptions = {}): Promise<Message[]> {
     const direction = checkDirection(opts.direction ?? "in");
-    const res = await this.client._get(
+    const res = await this.#client._get(
       `/api/v1/inboxes/${this.address}/messages?direction=${direction}`,
     );
     return ((res.emails as any[]) || []).map((e) => this._wrap(e));
@@ -154,7 +191,7 @@ export class Inbox {
    */
   async latest(opts: ReadOptions = {}): Promise<Message | null> {
     const direction = checkDirection(opts.direction ?? "in");
-    const res = await this.client._get(
+    const res = await this.#client._get(
       `/api/v1/inboxes/${this.address}/latest?direction=${direction}`,
     );
     return res.email ? this._wrap(res.email) : null;
@@ -170,7 +207,7 @@ export class Inbox {
     const direction = checkDirection(opts.direction ?? "in");
     const deadline = Date.now() + Math.max(0, timeout);
     for (;;) {
-      const res = await this.client._get(
+      const res = await this.#client._get(
         `/api/v1/inboxes/${this.address}/latest?direction=${direction}`,
       );
       if (res.encrypted) {
@@ -200,7 +237,7 @@ export class Inbox {
     const deadline = Date.now() + Math.max(0, timeout);
     let seen: Record<string, any> | null = null; // newest incoming mail, code or not
     for (;;) {
-      const res = await this.client._get(`/api/v1/inboxes/${this.address}/latest?direction=in`);
+      const res = await this.#client._get(`/api/v1/inboxes/${this.address}/latest?direction=in`);
       if (res.encrypted) {
         throw new EncryptedInboxError(
           res.note || "This inbox is end-to-end encrypted; OTP cannot be read via the API.",
@@ -238,7 +275,7 @@ export class Inbox {
    * (`msg.attachments`); prefer `msg.attachments[0].download()`.
    */
   async downloadAttachment(messageId: number, attachmentId: number): Promise<Uint8Array> {
-    return this.client._getBytes(
+    return this.#client._getBytes(
       `/api/v1/inboxes/${this.address}/messages/${messageId}/attachments/${attachmentId}`,
     );
   }
@@ -264,17 +301,16 @@ export class Inbox {
    * Not retried on gateway errors: a retried send can deliver the same mail twice.
    */
   async send(to: string, opts: SendOptions = {}): Promise<Record<string, any>> {
+    // `attachments` is handled apart because its VALUE is transformed (bytes → base64);
+    // everything else is name mapping, and unknown fields reach the server (see payload.ts).
     const payload: Record<string, any> = {
       to,
       subject: opts.subject ?? "",
       body: opts.body ?? "",
+      ...buildPayload(opts, SEND_FIELDS, ["attachments"]),
     };
-    if (opts.html != null) payload.html = opts.html;
-    if (opts.inReplyTo != null) payload.in_reply_to = opts.inReplyTo;
-    if (opts.cc?.length) payload.cc = opts.cc;
-    if (opts.bcc?.length) payload.bcc = opts.bcc;
     if (opts.attachments?.length) payload.attachments = opts.attachments.map(encodeAttachment);
-    return this.client._post(`/api/v1/inboxes/${this.address}/send`, payload);
+    return this.#client._post(`/api/v1/inboxes/${this.address}/send`, payload);
   }
 
   /**
@@ -285,7 +321,7 @@ export class Inbox {
    * messages per check.
    */
   async message(messageId: number): Promise<Message> {
-    const res = await this.client._get(
+    const res = await this.#client._get(
       `/api/v1/inboxes/${this.address}/messages/${messageId}`,
     );
     return this._wrap(res.email ?? {});
@@ -323,11 +359,17 @@ export class Inbox {
         );
       }
       if (Date.now() >= deadline) {
+        // The last attempt's reason goes in the sentence when there has been one: a mail
+        // held by greylisting and a mail nobody will ever accept used to read identically.
+        // Timing out is still NOT a failure, so the wording keeps saying the queue works on.
+        const lastError = message.sendError || undefined;
         throw new SendTimeoutError(
           `Message ${messageId} was still ${status ?? "queued"} after ${timeout}ms. ` +
-            "It may still be delivered; the queue keeps retrying.",
+            "It may still be delivered; the queue keeps retrying." +
+            (lastError ? ` The last attempt reported: ${lastError}` : ""),
           messageId,
           status,
+          lastError,
         );
       }
       await sleep(Math.min(pollInterval, Math.max(0, deadline - Date.now())));
@@ -336,21 +378,21 @@ export class Inbox {
 
   /** Mark one message as read, so the next poll can skip it. */
   async markRead(messageId: number): Promise<Record<string, any>> {
-    return this.client._post(`/api/v1/inboxes/${this.address}/messages/${messageId}/read`, {}, true);
+    return this.#client._post(`/api/v1/inboxes/${this.address}/messages/${messageId}/read`, {}, true);
   }
 
   /** Delete every message in this inbox and keep the address. */
   async burn(): Promise<Record<string, any>> {
-    return this.client._post(`/api/v1/inboxes/${this.address}/burn`, {}, true);
+    return this.#client._post(`/api/v1/inboxes/${this.address}/burn`, {}, true);
   }
 
   /** Delete this inbox and all of its messages. Cannot be undone. */
   async delete(): Promise<Record<string, any>> {
-    return this.client._delete(`/api/v1/inboxes/${this.address}`);
+    return this.#client._delete(`/api/v1/inboxes/${this.address}`);
   }
 
   /** Delete a single message; the inbox stays. Backs `message.delete()`. */
   async deleteMessage(messageId: number): Promise<Record<string, any>> {
-    return this.client._delete(`/api/v1/inboxes/${this.address}/messages/${messageId}`);
+    return this.#client._delete(`/api/v1/inboxes/${this.address}/messages/${messageId}`);
   }
 }

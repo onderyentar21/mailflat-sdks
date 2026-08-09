@@ -90,6 +90,7 @@ export interface Message {
 
 export interface CreateInboxOptions {
   prefix?: string;
+  /** Display name. Paid plans only — on Free the response reports it in `ignored_fields`. */
   label?: string;
   subdomain?: string; // mailflat.net subdomain (random when omitted)
   domain?: string; // one of your verified BYOD domains

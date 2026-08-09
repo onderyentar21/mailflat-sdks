@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from email.utils import parseaddr
 
+from ._http import send_timeout_message
 from .errors import (EncryptedInboxError, MailFlatError, OTPTimeoutError, SendFailedError,
                      SendTimeoutError)
 
@@ -556,9 +557,9 @@ class Inbox:
                     message_id=message_id, status=status)
             if time.monotonic() >= deadline:
                 raise SendTimeoutError(
-                    f"Message {message_id} was still {status or 'queued'} after "
-                    f"{timeout:g}s. It may still be delivered; the queue keeps retrying.",
-                    message_id=message_id, status=status)
+                    send_timeout_message(message_id, status, timeout, message.send_error),
+                    message_id=message_id, status=status,
+                    last_error=message.send_error)
             time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
     def mark_read(self, message_id: int) -> dict[str, Any]:

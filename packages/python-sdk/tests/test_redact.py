@@ -80,3 +80,37 @@ def test_passes_scalars_and_none_through():
 def test_tuples_become_lists():
     """JSON carries a list anyway; preserving tuples would be fake fidelity."""
     assert redact_secrets(({"api_key": "x", "a": 1},)) == [{"a": 1}]
+
+
+# ========================================== value-based redaction (round 7 #5)
+def test_a_key_in_an_unexpected_field_is_still_redacted():
+    """A name-based defence cannot see a field name nobody thought of.
+
+    An external review showed it: a real `mf_live_` key carried in a field called
+    `account` passed through untouched. Enumerating field names leaves every name outside
+    the list unprotected, and no such list is ever complete.
+    """
+    out = redact_secrets({"account": "mf_live_REAL", "free": "mf_sk_REAL",
+                          "nested": {"whatever": "mf_live_REAL"}})
+    assert "mf_live_REAL" not in str(out)
+    assert "mf_sk_REAL" not in str(out)
+    assert "[redacted]" in str(out), "must be visibly masked, not silently dropped"
+
+
+def test_a_key_inside_an_error_sentence_is_redacted():
+    """Error sentences reach the model too; a key landing there is the same leak."""
+    out = redact_secrets({"error": "Auth failed for mf_live_ABC123"})
+    assert "mf_live_ABC123" not in out["error"]
+
+
+def test_message_content_is_NOT_touched():
+    """NEGATIVE CONTROL — and the original reason value scanning was rejected.
+
+    An email may legitimately discuss a test key. Masking it breaks the very message the
+    agent is waiting for: a worse failure than the one being prevented. The exception was
+    not removed, it was NARROWED to content fields, and this test locks that narrowing.
+    """
+    body = "Your API key is mf_sk_example123 — paste it into the form."
+    for field in ("body", "body_text", "body_html", "html", "text"):
+        out = redact_secrets({field: body})
+        assert out[field] == body, f"'{field}' content was mangled — real mail would suffer"

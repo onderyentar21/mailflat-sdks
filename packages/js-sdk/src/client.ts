@@ -11,6 +11,7 @@
 
 import { MailFlatError, raiseForStatus } from "./errors";
 import { Inbox } from "./inbox";
+import { buildPayload, CREATE_INBOX_FIELDS } from "./payload";
 import type { CreateInboxOptions } from "./types";
 import { VERSION } from "./version";
 
@@ -43,7 +44,9 @@ export interface MailFlatOptions {
 }
 
 export class MailFlat {
-  readonly apiKey: string;
+  // `!` because the value is installed with defineProperty (non-enumerable) rather than a
+  // plain assignment — the type is still `string`, tsc just cannot see the write.
+  readonly apiKey!: string;
   readonly baseUrl: string;
   private timeout: number;
   private maxRetries: number;
@@ -58,7 +61,12 @@ export class MailFlat {
         "An API key is required. Pass new MailFlat({ apiKey }) or set MAILFLAT_API_KEY.",
       );
     }
-    this.apiKey = apiKey;
+    // Non-enumerable: readable as `mf.apiKey` (some callers do), invisible to
+    // `JSON.stringify`, `console.log` and `util.inspect`. Second layer behind Inbox's
+    // `#client` — a MailFlat instance can be logged directly too.
+    Object.defineProperty(this, "apiKey", {
+      value: apiKey, enumerable: false, writable: false, configurable: false,
+    });
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.timeout = opts.timeout ?? 30000;
     this.maxRetries = Math.max(0, opts.maxRetries ?? 2);
@@ -194,12 +202,8 @@ export class MailFlat {
   // -------------------------------------------------------------- public
   /** Create a new inbox and return it. */
   async create(opts: CreateInboxOptions = {}): Promise<Inbox> {
-    const payload: Record<string, any> = {};
-    if (opts.prefix != null) payload.prefix = opts.prefix;
-    if (opts.label != null) payload.label = opts.label;
-    if (opts.subdomain != null) payload.subdomain = opts.subdomain;
-    if (opts.domain != null) payload.domain = opts.domain;
-    if (opts.retentionHours != null) payload.retention_hours = opts.retentionHours;
+    // Unknown fields go to the server, they are not dropped here — see payload.ts.
+    const payload = buildPayload(opts, CREATE_INBOX_FIELDS);
     const res = await this._post("/api/v1/inboxes", payload);
     const { address, ...meta } = res;
     return new Inbox(this, address, meta);

@@ -1,6 +1,6 @@
 {
   "name": "@mailflat/sdk",
-  "version": "0.5.0",
+  "version": "0.6.1",
   "description": "Official TypeScript/JavaScript SDK for MailFlat — disposable, automation-friendly email inboxes with one-line OTP retrieval.",
   "keywords": [
     "email",

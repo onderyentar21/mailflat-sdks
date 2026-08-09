@@ -312,11 +312,19 @@ public final class Inbox {
                         messageId, status);
             }
             if (System.nanoTime() >= deadline) {
+                // The reason goes into the sentence when the queue has actually tried:
+                // greylisting and an unreachable recipient used to read identically.
+                // Timing out is still NOT a failure, so the wording keeps saying so.
+                String lastError = message.sendError();
+                if (lastError != null && lastError.isEmpty()) {
+                    lastError = null;
+                }
                 throw new SendTimeoutException(
                         "Message " + messageId + " was still " + (status != null ? status : "queued")
                                 + " after " + timeoutSeconds + "s. It may still be delivered; "
-                                + "the queue keeps retrying.",
-                        messageId, status);
+                                + "the queue keeps retrying."
+                                + (lastError != null ? " The last attempt reported: " + lastError : ""),
+                        messageId, status, lastError);
             }
             sleep(SEND_POLL_MILLIS);
         }

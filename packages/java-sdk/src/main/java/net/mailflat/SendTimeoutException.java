@@ -4,6 +4,11 @@ package net.mailflat;
 
 public class SendTimeoutException extends SendException {
     public SendTimeoutException(String message, Integer messageId, String sendStatus) {
-        super(message, messageId, sendStatus);
+        this(message, messageId, sendStatus, null);
+    }
+
+    public SendTimeoutException(String message, Integer messageId, String sendStatus,
+                                String lastError) {
+        super(message, messageId, sendStatus, lastError);
     }
 }

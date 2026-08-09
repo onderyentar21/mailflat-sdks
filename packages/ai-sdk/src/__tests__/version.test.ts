@@ -23,3 +23,42 @@ describe("VERSION", () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+(-.+)?$/);
   });
 });
+
+describe("the @mailflat/sdk dependency pin", () => {
+  // Mirrors create-mailflat's lock, which earned its place: a stale `^0.3.2` pin sat in the
+  // scaffold for three SDK releases and shipped `waitUntilSent is not a function` to anyone
+  // who followed the docs. On 0.x a caret locks the MINOR — `^0.5.0` means >=0.5.0 <0.6.0 —
+  // so a pin one minor behind silently installs an SDK without the current fixes.
+  //
+  // ai-sdk had no such lock and hit exactly that on day 68: the published ai-sdk@0.6.0
+  // depends on @mailflat/sdk ^0.5.0, so every install of it resolves to an SDK still
+  // carrying B-077 (unknown fields dropped) and B-079 (account key printed). The release
+  // verifier said ✓ because it only asks whether an upper bound EXISTS, not whether the
+  // range admits the sibling we just published.
+  const sdkPkg = JSON.parse(
+    readFileSync(new URL("../../../js-sdk/package.json", import.meta.url), "utf8"),
+  );
+
+  it("🔒 admits the @mailflat/sdk version in this repo", () => {
+    const pin = pkg.dependencies?.["@mailflat/sdk"];
+    expect(pin, "@mailflat/sdk is not in dependencies — has the package been restructured?")
+      .toBeTruthy();
+
+    const match = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(pin);
+    expect(match, `unexpected pin shape ${pin} — this lock only understands caret pins`)
+      .not.toBeNull();
+
+    const [major, minor, patch] = match!.slice(1, 4).map(Number);
+    const [sdkMajor, sdkMinor, sdkPatch] = String(sdkPkg.version).split(".").map(Number);
+
+    expect(major, `${pin} has a different major than the SDK ${sdkPkg.version}`).toBe(sdkMajor);
+    if (sdkMajor === 0) {
+      expect(
+        minor,
+        `${pin} resolves to 0.${minor}.x only, but the SDK is ${sdkPkg.version} — ` +
+          `installing this package would pull an older SDK. Pin ^${sdkPkg.version}.`,
+      ).toBe(sdkMinor);
+    }
+    expect(patch, `${pin} is ahead of the SDK ${sdkPkg.version}`).toBeLessThanOrEqual(sdkPatch);
+  });
+});

@@ -73,13 +73,23 @@ export class OTPTimeoutError extends MailFlatError {
 export class SendError extends MailFlatError {
   /** Id of the message being watched. */
   messageId?: number;
-  /** Last delivery status seen — "queued" on timeout, "failed" on failure. */
+  /**
+   * Last delivery status seen — "queued" (accepted, never attempted) or "retrying"
+   * (attempted, not through yet) on timeout, "failed" on failure.
+   */
   status?: string;
-  constructor(message: string, messageId?: number, status?: string) {
+  /**
+   * What the most recent delivery attempt reported, when there has been one. On a
+   * timeout this separates "greylisted, try again in two minutes" from a problem no
+   * amount of waiting will fix — the sentence alone described neither.
+   */
+  lastError?: string;
+  constructor(message: string, messageId?: number, status?: string, lastError?: string) {
     super(message);
     this.name = "SendError";
     this.messageId = messageId;
     this.status = status;
+    this.lastError = lastError;
   }
 }
 
@@ -98,8 +108,8 @@ export class SendFailedError extends SendError {
  * may still be delivered. Greylisting alone can hold a mail for several minutes.
  */
 export class SendTimeoutError extends SendError {
-  constructor(message: string, messageId?: number, status?: string) {
-    super(message, messageId, status);
+  constructor(message: string, messageId?: number, status?: string, lastError?: string) {
+    super(message, messageId, status, lastError);
     this.name = "SendTimeoutError";
   }
 }

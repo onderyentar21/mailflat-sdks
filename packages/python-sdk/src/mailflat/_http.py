@@ -93,3 +93,26 @@ def interpret(status_code: int, data: Any, *, retry_after: float | None = None) 
     if isinstance(data, dict) and data.get("error"):
         raise MailFlatError(data["error"], status_code=status_code)
     return data if isinstance(data, dict) else {}
+
+
+#: States that mean "the queue is not done with this mail yet". `queued` = accepted but
+#: never attempted; `retrying` = attempted, did not get through, scheduled to try again.
+PENDING_SEND_STATUSES = ("queued", "retrying")
+
+
+def send_timeout_message(message_id: int, status: str | None, timeout: float,
+                         last_error: str | None = None) -> str:
+    """The sentence a caller reads when `wait_until_sent` gives up waiting.
+
+    Lives here — next to `should_retry` and `backoff_delay` — for the same reason those
+    do: the sync and the async client must not be able to word this differently. A shape
+    comparison would pass two different sentences; the parity test compares the result.
+
+    `last_error` is included when the queue has actually attempted delivery. Without it
+    the sentence described neither what happened nor what is about to happen: a mail held
+    by greylisting for two minutes and a mail nobody will ever accept read identically.
+    Timing out is still NOT a failure — the wording says the queue is still working.
+    """
+    head = (f"Message {message_id} was still {status or 'queued'} after {timeout:g}s. "
+            f"It may still be delivered; the queue keeps retrying.")
+    return f"{head} The last attempt reported: {last_error}" if last_error else head

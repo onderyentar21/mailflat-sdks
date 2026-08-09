@@ -76,11 +76,17 @@ class SendError(MailFlatError):
     """
 
     def __init__(self, message: str, *, message_id: int | None = None,
-                 status: str | None = None) -> None:
+                 status: str | None = None, last_error: str | None = None) -> None:
         super().__init__(message)
         self.message_id = message_id
-        #: Last delivery status seen — `"queued"` on timeout, `"failed"` on failure.
+        #: Last delivery status seen — `"queued"` (never attempted) or `"retrying"`
+        #: (attempted, not through yet) on timeout, `"failed"` on failure.
         self.status = status
+        #: What the most recent delivery attempt reported, when there has been one.
+        #: On a timeout this is the difference between "greylisted, try again in two
+        #: minutes" and a problem no amount of waiting will fix — the caller could not
+        #: tell those apart before, because the timeout sentence described neither.
+        self.last_error = last_error
 
 
 class SendFailedError(SendError):
