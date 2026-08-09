@@ -245,16 +245,38 @@ describe("waitUntilSent", () => {
     expect(res.note.toLowerCase()).toContain("do not send it again");
   });
 
-  it("🔒 answers the same way the Python surfaces do", async () => {
-    // The note is written out twice — once here, once in agent_results.py — because one is
-    // TypeScript and the other Python. Two wordings would be two products, so the sentence
-    // itself is compared against the Python constant by frontend/lib/docs-ai.test.mjs; here
-    // we lock the KEYS, which is the half a text comparison cannot see.
-    const { suite } = statusSuite("queued");
+  it("🔒 `retrying` does not read as `queued`", async () => {
+    // The queue separates "never attempted" from "attempted, scheduled again", and the
+    // status field carried that faithfully while the sentence said "Still queued" for both
+    // — erasing the distinction exactly where it is used, in the model's decision to keep
+    // waiting or not (B-099). Two external rounds reported it independently.
+    const { suite } = statusSuite("retrying", "Could not reach example.invalid: timed out");
     const res: any = await suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 1 });
-    expect(Object.keys(res).sort()).toEqual(
-      ["status", "delivered", "timedOut", "message", "note"].sort(),
+    expect(res.status).toBe("retrying");
+    expect(res.note).not.toContain("Still queued");
+    expect(res.note.toLowerCase()).toContain("attempted");
+    expect(res.note.toLowerCase()).toContain("do not send it again");
+    expect(JSON.stringify(res).toLowerCase()).not.toContain("fail");
+    // The reason the last attempt gave is the evidence behind "keep waiting". It sat on the
+    // exception and never reached the payload.
+    expect(res.error).toContain("Could not reach example.invalid");
+  });
+
+  it("🔒 every branch answers with the same keys", async () => {
+    // No hand-written key list here any more. The previous version of this test held a
+    // third copy of the tuple, agreed with itself forever, and checked only the queued
+    // branch — so the branch that had actually drifted (permanent failure, on MCP) was
+    // invisible to it. Cross-LANGUAGE parity is measured by QA/sdk-parity, which calls all
+    // four model surfaces and reads the key set from SEND_RESULT_KEYS itself; what belongs
+    // here is the invariant this surface can check alone: the three branches agree.
+    const branches = await Promise.all(
+      [statusSuite("sent"), statusSuite("queued"), statusSuite("failed", "550 unknown mailbox")]
+        .map(({ suite }) =>
+          suite.waitUntilSent.execute({ address: ADDR, messageId: 5, timeout: 1 })),
     );
+    const shapes = branches.map((res: any) => Object.keys(res).sort().join(","));
+    expect(new Set(shapes).size).toBe(1);
+    expect(shapes[0].split(",")).toContain("error");
   });
 });
 

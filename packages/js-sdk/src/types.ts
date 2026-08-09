@@ -166,14 +166,34 @@ export const MAX_SUBJECT_CHARS = 200;
  * answer a message the service itself had accepted, with no way out offered. Truncating a
  * value WE derived is not the same as truncating the caller's input: an explicit
  * `subject:` that is too long is still rejected, because the caller can fix that.
+ *
+ * The same reasoning covers CONTROL CHARACTERS, and the rule had only been applied along
+ * the length axis. A stranger can send a subject whose RFC 2047 encoded-word decodes to a
+ * real CRLF; the server stored it, this helper prefixed `Re: `, and the server's header
+ * guard then rejected it \u2014 so that message could never be answered again, permanently.
+ * Same test: can the caller fix the value? They did not write it, so no.
  */
 export function replySubject(subject?: string | null): string {
-  const text = (subject || "").trim();
+  const text = oneLine(subject || "").trim();
   if (!text) return "Re:";
   const reply = text.toLowerCase().startsWith("re:") ? text : `Re: ${text}`;
   return reply.length <= MAX_SUBJECT_CHARS
     ? reply
     : reply.slice(0, MAX_SUBJECT_CHARS - 1) + "\u2026";
+}
+
+/**
+ * Control characters out of a value about to become a mail header.
+ *
+ * A space, not deletion: `"a\r\nb"` becoming `"ab"` would silently join two words. Tab
+ * survives \u2014 it is horizontal space and does not split a header line.
+ */
+function oneLine(text: string): string {
+  // \x09 (tab) is deliberately outside the ranges; \x0A (LF) is deliberately inside.
+  // A RUN collapses to one space — CRLF is two characters and "a\r\nb" should read
+  // "a b", not "a  b".
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x08\x0A-\x1F\x7F]+/g, " ");
 }
 
 /** Convert an /api/v1 attachment payload (snake_case) to `Attachment` (camelCase). */

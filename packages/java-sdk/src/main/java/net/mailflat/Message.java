@@ -269,7 +269,7 @@ public final class Message {
     static final int MAX_SUBJECT_CHARS = 200;
 
     static String replySubject(String subject) {
-        String s = subject == null ? "" : subject.trim();
+        String s = oneLine(subject == null ? "" : subject).trim();
         if (s.isEmpty()) {
             return "Re:";
         }
@@ -279,9 +279,41 @@ public final class Message {
         // exceed 200 and reply() refused to answer a message the service had accepted.
         // Truncating a value WE derived differs from truncating the caller's input: an
         // explicit subject that is too long is still rejected, because they can fix it.
+        //
+        // Control characters follow the same rule, and it took a second external round to
+        // notice the rule had only been applied along the length axis. A stranger can send a
+        // subject whose RFC 2047 encoded-word decodes to a real CRLF; the server stored it,
+        // this helper prefixed "Re: ", and the server's header guard then rejected it \u2014 so
+        // that message could never be answered again, permanently.
         return reply.length() <= MAX_SUBJECT_CHARS
                 ? reply
                 : reply.substring(0, MAX_SUBJECT_CHARS - 1) + "\u2026";
+    }
+
+    /**
+     * Control characters out of a value about to become a mail header.
+     *
+     * <p>A space, not deletion: {@code "a\r\nb"} becoming {@code "ab"} would silently join
+     * two words. Tab survives \u2014 it is horizontal space and does not split a header line.
+     */
+    static String oneLine(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        boolean inRun = false;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            boolean control = (ch < ' ' && ch != '\t') || ch == '\u007F';
+            if (control) {
+                // A RUN collapses to one space: CRLF is two characters and "a\r\nb" should
+                // read "a b", not "a  b".
+                if (!inRun) {
+                    out.append(' ');
+                }
+            } else {
+                out.append(ch);
+            }
+            inRun = control;
+        }
+        return out.toString();
     }
 
     /** Mark this message as read, so the next poll can skip it. */

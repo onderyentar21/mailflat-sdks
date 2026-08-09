@@ -21,6 +21,7 @@ from .agent_results import (
     SEND_FAILED_NOTE,
     SEND_QUEUED_NOTE,
     SEND_RESULT_KEYS,
+    SEND_RETRYING_NOTE,
     failed_result,
     queued_result,
     sent_result,
@@ -45,7 +46,7 @@ from .redact import redact_secrets
 
 # The package's ONLY version source — pyproject.toml reads it via [tool.hatch.version].
 # Releasing = bump this line and nothing else.
-__version__ = "0.10.2"
+__version__ = "0.11.0"
 
 __all__ = [
     "MailFlat",
@@ -67,6 +68,7 @@ __all__ = [
     "redact_secrets",
     "SEND_RESULT_KEYS",
     "SEND_QUEUED_NOTE",
+    "SEND_RETRYING_NOTE",
     "SEND_FAILED_NOTE",
     "sent_result",
     "queued_result",

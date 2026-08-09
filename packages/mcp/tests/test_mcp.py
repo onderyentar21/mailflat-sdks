@@ -310,8 +310,16 @@ def test_wait_until_sent_reports_delivery(patched):
     assert res["message"]["id"] == mid
 
 
-def test_wait_until_sent_raises_on_permanent_failure(patched):
-    """T2 — the queue gave up. This one RAISES, so MCP marks the call isError."""
+def test_wait_until_sent_reports_permanent_failure_with_the_reason(patched):
+    """T2 — the queue gave up, and the model is told what to do about it.
+
+    This used to raise `ToolError(str(e))`, and that made MCP the ONE model surface where
+    the shared payload never existed: the note that says "fix the cause before sending
+    again" was dead text here, the remote server's sentence went into model context
+    unredacted, and `failed_result` was not even imported (B-097). The reason for raising
+    was "the reason travels in the message" — which `failed_result` does better, carrying
+    the reason AND the instruction under the keys every other surface uses.
+    """
     addr = server.create_inbox(label="failed")["address"]
     mid = server.send_email(addr, to="nobody@example.com")["message_id"]
     patched.status_steps = ["failed"]
@@ -319,8 +327,13 @@ def test_wait_until_sent_raises_on_permanent_failure(patched):
         if e["id"] == mid:
             e["send_error"] = "550 unknown mailbox"
 
-    with pytest.raises(Exception, match="550 unknown mailbox"):
-        server.wait_until_sent(addr, mid, timeout=5)
+    res = server.wait_until_sent(addr, mid, timeout=5)
+
+    assert res["status"] == "failed"
+    assert res["delivered"] is False
+    assert res["timed_out"] is False
+    assert "550 unknown mailbox" in res["error"]
+    assert "before sending again" in res["note"]
 
 
 def test_wait_until_sent_timeout_does_not_read_as_failure(patched):

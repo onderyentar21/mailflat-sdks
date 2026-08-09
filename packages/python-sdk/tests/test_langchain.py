@@ -255,6 +255,73 @@ def test_wait_until_sent_timeout_does_not_read_as_failure():
     assert "do not send it again" in out["note"].lower()
 
 
+def test_retrying_does_not_read_as_queued():
+    """🔒 `queued` and `retrying` are different answers to "should I keep waiting?".
+
+    The queue went to the trouble of separating "never attempted" from "attempted and
+    scheduled again", the status field carried it, and the SENTENCE said "Still queued" for
+    both — putting the distinction back into a field a model reads past (B-099). Two
+    external test rounds reported it independently on the same day.
+    """
+    handler = _status_handler("retrying", "Could not reach example.invalid: timed out")
+    tools = _tools_by_name(make_toolkit(handler))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 0})
+    assert out["status"] == "retrying"
+    assert "Still queued" not in out["note"]
+    assert "attempted" in out["note"].lower()
+    assert "do not send it again" in out["note"].lower()
+    assert "fail" not in json.dumps(out).lower()
+
+
+def test_the_last_delivery_error_reaches_the_model():
+    """🔒 `last_error` is the evidence behind "keep waiting".
+
+    `errors.py` states the reason the field exists: the difference between "greylisted, try
+    again in two minutes" and a problem no amount of waiting will fix. It sat on the
+    exception and never reached the payload, so the one surface that could not tell those
+    apart was the model surface — the one the distinction was added for.
+    """
+    handler = _status_handler("retrying", "Could not reach example.invalid: timed out")
+    tools = _tools_by_name(make_toolkit(handler))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 0})
+    assert "Could not reach example.invalid" in (out["error"] or "")
+
+
+def test_every_branch_answers_with_the_same_keys():
+    """🔒 One shape for all outcomes, read from SEND_RESULT_KEYS itself.
+
+    The old lock was a hand-written copy of the list inside one TypeScript test, covering
+    one branch. A copy agrees with itself forever; the branch that had drifted was the one
+    it did not cover, on a surface it did not call (B-097).
+    """
+    from mailflat.agent_results import SEND_RESULT_KEYS
+
+    shapes = set()
+    for status, error in (("sent", None), ("queued", None), ("retrying", "temporary"),
+                          ("failed", "550 unknown mailbox")):
+        tools = _tools_by_name(make_toolkit(_status_handler(status, error)))
+        out = tools["wait_until_sent"].invoke(
+            {"address": ADDR, "message_id": 5, "timeout": 0})
+        assert set(out) == set(SEND_RESULT_KEYS), f"{status} branch has a different shape"
+        shapes.add(tuple(sorted(out)))
+    assert len(shapes) == 1
+
+
+def test_an_api_key_in_a_rejection_sentence_is_redacted():
+    """🔒 The branch carrying text we do NOT author was the unredacted one.
+
+    Only the success branch went through `redact_secrets`, and `redact.py` names "an error
+    sentence" among the cases value scanning exists for. The remote mail server writes that
+    sentence; we hand it to the model (B-098).
+    """
+    canary = "mf_live_CANARY123456789"
+    handler = _status_handler("failed", f"would not accept {canary}@x: 550 No such user")
+    tools = _tools_by_name(make_toolkit(handler))
+    out = tools["wait_until_sent"].invoke({"address": ADDR, "message_id": 5, "timeout": 0})
+    assert canary not in json.dumps(out)
+    assert "[redacted]" in json.dumps(out)
+
+
 # ----------------------------------------------------------------- err guard
 def test_error_returned_not_raised():
     handler = lambda req: httpx.Response(401, json={"detail": "Invalid API key"})

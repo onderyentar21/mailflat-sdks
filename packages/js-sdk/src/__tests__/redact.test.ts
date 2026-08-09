@@ -77,4 +77,40 @@ describe("redactSecrets", () => {
     const e = new Error("boom");
     expect(redactSecrets(e)).toBe(e);
   });
+
+  // ------------------------------------------------------- value scanning (B-098)
+  // A name-based defence cannot see a name nobody thought of. The Python side gained value
+  // scanning; this file kept a comment saying the idea had been rejected, and the two
+  // surfaces drifted for three releases. The cross-surface parity matrix found it by
+  // planting a key in a rejection sentence.
+
+  it("🔒 masks our own key prefixes in a field nobody thought to name", () => {
+    const out: any = redactSecrets({
+      account: "mf_live_REAL", free: "mf_sk_REAL", nested: { whatever: "mf_live_REAL" },
+    });
+    const dumped = JSON.stringify(out);
+    expect(dumped).not.toContain("mf_live_REAL");
+    expect(dumped).not.toContain("mf_sk_REAL");
+    expect(dumped).toContain("[redacted]");
+  });
+
+  it("🔒 masks a key inside an error sentence", () => {
+    // The branch carrying text we do not author is the branch that was unredacted.
+    const out: any = redactSecrets({
+      error: "host would not accept mf_live_ABC123@x.test: 550 No such user",
+    });
+    expect(out.error).not.toContain("mf_live_ABC123");
+    expect(out.error).toContain("550 No such user");
+  });
+
+  it("NEGATIVE CONTROL — message content is not touched", () => {
+    // An email may legitimately discuss a test key. Mangling it breaks the very message the
+    // agent is waiting for: a worse failure than the one being prevented. Same narrowing as
+    // redact.py, and the reason value scanning is not applied everywhere.
+    const body = "Your API key is mf_sk_example123 — paste it into the form.";
+    for (const field of ["body", "body_text", "bodyHtml", "html", "text", "raw"]) {
+      const out: any = redactSecrets({ [field]: body });
+      expect(out[field]).toBe(body);
+    }
+  });
 });

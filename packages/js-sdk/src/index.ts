@@ -12,7 +12,11 @@ export { MailFlat } from "./client";
 export type { MailFlatOptions } from "./client";
 export { Inbox } from "./inbox";
 export { redactSecrets, SECRET_NAME_PARTS } from "./redact";
-export { replySubject } from "./types";
+// `MAX_SUBJECT_CHARS` is exported alongside `replySubject`: a caller building its own
+// subject needs the same number the helper enforces, and an unexported constant makes
+// them guess it. Found by probing the PUBLISHED package — the local test imported it
+// from "../types" directly and so never noticed it was missing from the public surface.
+export { MAX_SUBJECT_CHARS, replySubject } from "./types";
 export type {
   Message,
   Attachment,

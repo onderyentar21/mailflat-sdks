@@ -216,6 +216,22 @@ class FeatureAlignmentTest {
     }
 
     @Test
+    void replySubjectRepairsControlCharactersItDidNotWrite() {
+        // A stranger's subject must not make a message permanently unanswerable. Inbound
+        // mail is parsed with RFC 2047 encoded-words decoded, so a stored subject can hold a
+        // real CRLF; this helper prefixed "Re: " and the server's header guard then rejected
+        // it — forever, for that message, triggerable by anyone who can send mail to the
+        // inbox. Same rule as the length axis: repair what WE derived, reject what the
+        // caller wrote, because only the caller can fix theirs.
+        assertEquals("Re: a b", Message.replySubject("a\r\nb"));
+        String repaired = Message.replySubject("x\r\nBcc: victim@example.com");
+        assertTrue(!repaired.contains("\r") && !repaired.contains("\n"));
+        assertTrue(repaired.contains("Bcc: victim@example.com"), "text dropped, not repaired");
+        // Tab is horizontal space; it does not split a header line and survives.
+        assertTrue(Message.replySubject("a\tb").contains("\t"));
+    }
+
+    @Test
     void replyWithoutMessageIdSendsNoInReplyTo() throws Exception {
         // Encrypted inbox: no headers stored. The reply must still go out, just unthreaded.
         responseBody = "{\"email\":{\"id\":1,\"sender\":\"a@b.com\",\"subject\":\"hi\"}}";

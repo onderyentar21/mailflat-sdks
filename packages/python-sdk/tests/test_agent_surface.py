@@ -493,3 +493,26 @@ def test_reply_to_handles_a_repeated_header():
 def test_reply_to_ignores_a_malformed_header():
     msg = _msg_with({"Reply-To": "not-an-address", "From": "Real <real@acme.com>"})
     assert msg.reply_to_address == "real@acme.com"
+
+
+def test_reply_subject_repairs_control_characters_it_did_not_write():
+    """🔒 A stranger's subject must not make a message permanently unanswerable.
+
+    Inbound mail is parsed with encoded-words decoded, so `=?utf-8?B?YQ0KYg==?=` is stored
+    as a subject containing a real CRLF. This helper prefixed `Re: ` and handed it back, the
+    server's header guard rejected it, and `reply()` failed forever on that message — for
+    anyone, triggered by anyone who can send mail to a MailFlat inbox.
+
+    Same rule as the length axis, which was already applied here: a value WE derived gets
+    repaired, a value the CALLER wrote gets rejected, because only the caller can fix theirs.
+    """
+    from mailflat.inbox import _reply_subject
+
+    out = _reply_subject("x\r\nBcc: victim@example.com")
+    assert "\r" not in out and "\n" not in out
+    assert out.startswith("Re: x")
+    assert "Bcc: victim@example.com" in out, "the text was dropped, not repaired"
+    # A space, not deletion: "a\r\nb" must not silently become one word.
+    assert _reply_subject("a\r\nb") == "Re: a b"
+    # Tab is horizontal space; it does not split a header line and survives.
+    assert "\t" in _reply_subject("a\tb")

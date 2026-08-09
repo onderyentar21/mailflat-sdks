@@ -49,6 +49,7 @@ from mailflat import (
     OTPTimeoutError,
     SendFailedError,
     SendTimeoutError,
+    failed_result,
     queued_result,
     redact_secrets,
     sent_result,
@@ -232,7 +233,11 @@ def wait_until_sent(address: str, message_id: int, timeout: int = 60) -> dict:
 
     Returns `delivered: true` once it went out. If it is still queued when the timeout
     elapses you get `timed_out: true` with `delivered: false` — that is NOT a failure and
-    you must NOT send the mail again; the queue is still retrying."""
+    you must NOT send the mail again; the queue is still retrying. `status` tells you
+    whether it has been attempted yet (`queued`) or attempted and rescheduled (`retrying`),
+    and `error` carries what the last attempt reported. Permanent failure comes back the
+    same way, as `status: failed` with the reason in `error` — read `note` before you
+    resend anything."""
     try:
         with _client() as c:
             return sent_result(c.inbox(address).wait_until_sent(message_id, timeout=timeout))
@@ -243,9 +248,15 @@ def wait_until_sent(address: str, message_id: int, timeout: int = 60) -> dict:
         # went wrong, and the model's reasonable next move would be to send it again.
         return queued_result(e)
     except SendFailedError as e:
-        # This one DOES raise: delivery is over and it did not work. The reason travels in
-        # the message so the model can decide whether a corrected resend makes sense.
-        raise ToolError(str(e)) from e
+        # Also NOT raised — and this branch used to be the exception (B-097). The reasoning
+        # for raising was "the reason travels in the message so the model can decide whether
+        # a corrected resend makes sense", which is exactly what `failed_result` does
+        # better: it carries the reason AND the instruction (`SEND_FAILED_NOTE`: fix the
+        # cause before sending again), redacted, under the same keys every other model
+        # surface uses. `ToolError(str(e))` threw the instruction away, put the remote MTA's
+        # unredacted sentence into model context, and made this the one surface where the
+        # cross-surface payload did not exist at all.
+        return failed_result(e)
     except MailFlatError as e:
         raise ToolError(str(e)) from e
 

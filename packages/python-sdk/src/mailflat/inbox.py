@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,12 +55,33 @@ def _reply_subject(subject: str | None) -> str:
     service itself had accepted. The agent had no way out: the helper neither trimmed nor
     explained. Truncating a value WE derived is different from truncating the caller's
     input; the caller's own `subject=` is still rejected when too long, because they can fix it.
+
+    The same reasoning covers CONTROL CHARACTERS, and it took a second external round to
+    notice the rule had only been applied along the length axis. A stranger can send a
+    subject whose RFC 2047 encoded-word decodes to a real CRLF; the server stored it, this
+    helper prefixed `Re: ` and handed it back, and the server's own header guard then
+    rejected it — so that message could never be answered again, by anyone, permanently.
+    The test is the same one: can the caller fix the value? They did not write it, so no.
     """
-    text = (subject or "").strip()
+    text = _one_line(subject or "").strip()
     if not text:
         return "Re:"
     reply = text if text.lower().startswith("re:") else f"Re: {text}"
     return reply if len(reply) <= MAX_SUBJECT_CHARS else reply[:MAX_SUBJECT_CHARS - 1] + "…"
+
+
+#: Control characters that must not reach a mail header. Tab is absent on purpose: it is
+#: horizontal space and does not split a header line. A RUN collapses to one space — CRLF is
+#: two characters and "a\r\nb" should read "a b", not "a  b".
+_CONTROL_RUN = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]+")
+
+
+def _one_line(text: str) -> str:
+    """Control characters out of a value that is about to become a mail header.
+
+    A space, not deletion: `"a\\r\\nb"` becoming `"ab"` would silently join two words.
+    """
+    return _CONTROL_RUN.sub(" ", text)
 
 
 def _encode_attachment(item: Any) -> dict[str, str]:

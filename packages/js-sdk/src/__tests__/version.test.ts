@@ -24,3 +24,15 @@ describe("VERSION", () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+(-.+)?$/);
   });
 });
+
+describe("public export surface", () => {
+  // Probing the published package showed `MAX_SUBJECT_CHARS` was missing from the package
+  // root: the tests imported it from "../types" directly, so they proved the value existed
+  // without proving a USER could reach it. Importing through the entry point is the only
+  // way to test what ships.
+  it("🔒 exports the subject limit next to the helper that enforces it", async () => {
+    const pkg = await import("../index");
+    expect(typeof (pkg as any).replySubject).toBe("function");
+    expect(typeof (pkg as any).MAX_SUBJECT_CHARS).toBe("number");
+  });
+});

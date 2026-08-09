@@ -17,7 +17,7 @@ Connected to:
 
 Key exports:
   - `SEND_RESULT_KEYS` — the keys every surface must return (cross-surface parity lock)
-  - `SEND_QUEUED_NOTE` / `SEND_FAILED_NOTE` — the sentences the model reads
+  - `SEND_QUEUED_NOTE` / `SEND_RETRYING_NOTE` / `SEND_FAILED_NOTE` — the sentences read
   - `sent_result()`, `queued_result()`, `failed_result()` — the three outcomes
 """
 from __future__ import annotations
@@ -26,12 +26,21 @@ from typing import Any
 
 from .redact import redact_secrets
 
-#: Every `wait_until_sent` result carries exactly these keys, on every surface. A model
-#: that learned to read one surface can read the others; a test compares this tuple with
-#: what the TypeScript surface returns.
-SEND_RESULT_KEYS = ("status", "delivered", "timed_out", "message", "note")
+#: Every `wait_until_sent` result carries exactly these keys, on every surface — including
+#: the branches that end badly, which is where parity used to break. A model that learned
+#: to read one surface can read the others.
+#:
+#: 🔒 Locked by `QA/sdk-parity/`, which CALLS all four model surfaces (MCP over the real
+#: protocol, both LangChain toolkits, the AI SDK tool) on all three branches and reads the
+#: expected key set from THIS tuple. The previous claim in this comment — "a test compares
+#: this tuple with what the TypeScript surface returns" — was not true: nothing referenced
+#: `SEND_RESULT_KEYS`, one TS test hard-coded a third copy of the list, it covered only the
+#: queued branch, and the branch that had actually drifted (failed, on MCP) was the one
+#: nobody looked at. An external round found it there (B-097).
+SEND_RESULT_KEYS = ("status", "delivered", "timed_out", "message", "note", "error")
 
-#: Shown when the mail is still queued. The last sentence is the point of the whole module.
+#: Shown when the mail was never even attempted. The last sentence is the point of the
+#: whole module.
 #:
 #: Written WITHOUT the word "fail" on purpose, and locked that way by test. The first draft
 #: opened with "This is NOT a failure" — accurate, but it puts the very word we are trying
@@ -41,6 +50,22 @@ SEND_QUEUED_NOTE = (
     "Still queued when the timeout elapsed. The queue keeps retrying with backoff, so this "
     "mail is still on its way. Do NOT send it again — a duplicate would reach the recipient "
     "twice. Ask again later, or subscribe to the message.delivered webhook."
+)
+
+#: Shown when delivery HAS been attempted and has not got through yet.
+#:
+#: Same ban on the word "fail", same instruction not to resend — but a different fact. The
+#: queue separates `queued` (never attempted) from `retrying` (attempted, scheduled again)
+#: and the structural field carried that distinction correctly, while this sentence said
+#: "Still queued" for both and erased it again (B-099). Two independent external rounds
+#: reported it the same day. The field and the prose come from different layers; only the
+#: prose reaches the model's reasoning.
+SEND_RETRYING_NOTE = (
+    "Delivery was attempted and has not got through yet. The queue has already scheduled "
+    "another attempt with backoff, so this mail is still on its way. Read `error` for what "
+    "the last attempt reported: a temporary rejection such as greylisting clears on its "
+    "own. Do NOT send it again — a duplicate would reach the recipient twice. Ask again "
+    "later, or subscribe to the message.delivered webhook."
 )
 
 #: Shown when the queue gave up. Here resending after fixing the cause IS the right move.
@@ -64,31 +89,42 @@ def sent_result(message: Any) -> dict[str, Any]:
         "timed_out": False,
         "message": message.raw,
         "note": "",
+        "error": None,
     })
 
 
 def queued_result(error: Any) -> dict[str, Any]:
-    """We stopped waiting; the queue did not. Built from a `SendTimeoutError`."""
-    return {
-        "status": error.status or "queued",
+    """We stopped waiting; the queue did not. Built from a `SendTimeoutError`.
+
+    The note follows the STATUS, because the two are not the same answer: `queued` means
+    nothing has been tried, `retrying` means something was tried and did not get through.
+    A model deciding "keep waiting or give up?" needs that difference, and `last_error` is
+    the evidence behind it — `errors.py` calls it the difference between "greylisted, try
+    again in two minutes" and a problem no amount of waiting will fix. It was sitting on
+    the exception and never reached the payload (B-099).
+    """
+    status = getattr(error, "status", None) or "queued"
+    return redact_secrets({
+        "status": status,
         "delivered": False,
         "timed_out": True,
         "message": None,
-        "note": SEND_QUEUED_NOTE,
-    }
+        "note": SEND_RETRYING_NOTE if status == "retrying" else SEND_QUEUED_NOTE,
+        "error": getattr(error, "last_error", None),
+    })
 
 
 def failed_result(error: Any) -> dict[str, Any]:
     """Delivery is over and it did not work. Built from a `SendFailedError`.
 
-    Carries an extra `error` key on top of `SEND_RESULT_KEYS`: the reason is the only
-    thing that lets the caller decide whether a corrected resend makes sense.
+    `error` carries the reason: the only thing that lets the caller decide whether a
+    corrected resend makes sense.
     """
-    return {
-        "status": error.status or "failed",
+    return redact_secrets({
+        "status": getattr(error, "status", None) or "failed",
         "delivered": False,
         "timed_out": False,
         "message": None,
         "note": SEND_FAILED_NOTE,
         "error": str(error),
-    }
+    })

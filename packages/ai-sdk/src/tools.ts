@@ -37,13 +37,26 @@ import {
 import { z } from "zod";
 
 /**
- * Still queued when we stopped waiting. Must match SEND_QUEUED_NOTE in agent_results.py.
+ * Never attempted. Must match SEND_QUEUED_NOTE in agent_results.py.
  * Deliberately contains no form of the word "fail" — see the note on the Python constant.
  */
 const SEND_QUEUED_NOTE =
   "Still queued when the timeout elapsed. The queue keeps retrying with backoff, so this " +
   "mail is still on its way. Do NOT send it again — a duplicate would reach the recipient " +
   "twice. Ask again later, or subscribe to the message.delivered webhook.";
+
+/**
+ * Attempted, not through yet. Must match SEND_RETRYING_NOTE in agent_results.py.
+ * Same ban on the word "fail". `queued` and `retrying` are different answers to "should I
+ * keep waiting?", and answering both with "Still queued" erased a distinction the queue
+ * had gone to the trouble of making (B-099).
+ */
+const SEND_RETRYING_NOTE =
+  "Delivery was attempted and has not got through yet. The queue has already scheduled " +
+  "another attempt with backoff, so this mail is still on its way. Read `error` for what " +
+  "the last attempt reported: a temporary rejection such as greylisting clears on its " +
+  "own. Do NOT send it again — a duplicate would reach the recipient twice. Ask again " +
+  "later, or subscribe to the message.delivered webhook.";
 
 /** The queue gave up. Must match SEND_FAILED_NOTE in agent_results.py. */
 const SEND_FAILED_NOTE =
@@ -287,7 +300,7 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
     ),
 
     waitUntilSent: defineTool(
-      "Find out whether a mail you sent was actually delivered. sendEmail only means 'accepted for delivery'; the mail goes out later on a queue. Pass the messageId sendEmail returned. Returns delivered:true once it went out. If it is still queued when the timeout elapses you get timedOut:true with delivered:false — that is NOT a failure and you must NOT send the mail again; the queue is still retrying.",
+      "Find out whether a mail you sent was actually delivered. sendEmail only means 'accepted for delivery'; the mail goes out later on a queue. Pass the messageId sendEmail returned. Returns delivered:true once it went out. If it is still queued when the timeout elapses you get timedOut:true with delivered:false — that is NOT a failure and you must NOT send the mail again; the queue is still retrying. status tells you whether it has been attempted yet (queued) or attempted and rescheduled (retrying), and error carries what the last attempt reported. Permanent failure comes back the same way, as status:failed with the reason in error — read note before you resend anything.",
       z.object({
         address: z.string().describe("The inbox address the mail was sent from."),
         messageId: z.number().describe("The id sendEmail returned for the mail."),
@@ -317,29 +330,37 @@ export function mailflatToolSuite(options: ToolSuiteOptions = {}): Record<string
             timedOut: false,
             message: msg.raw,
             note: "",
+            error: null,
           });
         } catch (err) {
           // Order matters: SendTimeoutError and SendFailedError both extend MailFlatError,
           // so a leading `instanceof MailFlatError` branch would swallow both and answer
           // every outcome with a bare {error} — the exact flattening this tool exists to
           // prevent.
+          //
+          // All three branches go through redactSecrets. Only the success branch used to,
+          // and the unredacted branches were the ones carrying text we do not control (a
+          // remote MTA's rejection sentence) — the asymmetry pointed the wrong way, and
+          // redact.ts names "an error sentence" among the cases value scanning exists for
+          // (B-098).
           if (err instanceof SendTimeoutError)
-            return {
+            return redactSecrets({
               status: err.status ?? "queued",
               delivered: false,
               timedOut: true,
               message: null,
-              note: SEND_QUEUED_NOTE,
-            };
+              note: err.status === "retrying" ? SEND_RETRYING_NOTE : SEND_QUEUED_NOTE,
+              error: err.lastError ?? null,
+            });
           if (err instanceof SendFailedError)
-            return {
+            return redactSecrets({
               status: err.status ?? "failed",
               delivered: false,
               timedOut: false,
               message: null,
               note: SEND_FAILED_NOTE,
               error: err.message,
-            };
+            });
           if (err instanceof MailFlatError) return { error: err.message };
           throw err;
         }

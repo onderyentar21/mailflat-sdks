@@ -342,6 +342,15 @@ describe("reply", () => {
     expect(replySubject("Re: Question")).toBe("Re: Question");
     expect(replySubject("RE: Question")).toBe("RE: Question");
     expect(replySubject(null)).toBe("Re:");
+
+    // 🔒 A stranger's subject must not make a message permanently unanswerable. Inbound
+    // mail is parsed with encoded-words decoded, so a subject can hold a real CRLF; this
+    // helper prefixed "Re: " and the server's header guard then rejected it, forever, for
+    // that message. Same rule as the length axis: repair what WE derived, reject what the
+    // caller wrote.
+    expect(replySubject("a\r\nb")).toBe("Re: a b");
+    expect(replySubject("x\r\nBcc: victim@example.com")).not.toMatch(/[\r\n]/);
+    expect(replySubject("a\tb")).toContain("\t");
   });
 
   it("still sends when the message carries no thread id", async () => {
